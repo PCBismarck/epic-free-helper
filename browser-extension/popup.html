@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Epic 周免助手</title>
+    <link rel="stylesheet" href="popup.css">
+    <script src="popup.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <span class="app-mark" aria-hidden="true">E</span>
+        <div>
+          <p class="eyebrow">EPIC GAMES</p>
+          <h1>Epic 周免助手</h1>
+        </div>
+      </header>
+
+      <section class="status-card" aria-label="领取状态" aria-live="polite">
+        <div class="status-line">
+          <span id="status-dot" class="status-dot" aria-hidden="true"></span>
+          <p id="status-text">正在读取最近状态…</p>
+        </div>
+        <p id="status-note" class="status-note" hidden></p>
+        <p class="updated">本次时间 <time id="updated-at">尚未运行</time></p>
+      </section>
+
+      <div class="actions">
+        <button id="run-button" class="primary" type="button" disabled>领取本周游戏</button>
+        <button id="stop-button" class="secondary" type="button" disabled>停止本次任务</button>
+      </div>
+      <p id="notice" class="notice" role="alert" hidden></p>
+
+      <section class="schedule" aria-label="自动检查设置">
+        <label class="schedule-label" for="enabled-toggle">
+          <span>每天 23:35 自动检查<span class="timezone">（北京时间）</span></span>
+          <input id="enabled-toggle" type="checkbox" role="switch" disabled>
+        </label>
+        <p>浏览器开启时运行，遇到验证会暂停。</p>
+      </section>
+
+      <section class="games" aria-labelledby="games-heading">
+        <h2 id="games-heading">最近游戏</h2>
+        <p id="empty-games" class="empty">尚无领取记录</p>
+        <ol id="game-list"></ol>
+      </section>
+    </main>
+  </body>
+</html>

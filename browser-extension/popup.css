@@ -1,0 +1,69 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #e8eef8;
+  background: #101722;
+  font-size: 13px;
+}
+
+* { box-sizing: border-box; }
+body { width: 360px; margin: 0; }
+main { padding: 22px 20px 20px; }
+header { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
+.app-mark {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 1px solid #426795;
+  border-radius: 11px;
+  background: #1a304c;
+  color: #a9cbff;
+  font-weight: 800;
+  font-size: 23px;
+}
+.eyebrow { margin: 0 0 3px; color: #8295af; font-size: 10px; letter-spacing: 1.4px; }
+h1 { margin: 0; font-size: 20px; font-weight: 650; }
+h2 { margin: 0 0 12px; color: #b5c3d8; font-size: 12px; font-weight: 600; }
+.status-card { padding: 15px; border: 1px solid #28364a; border-radius: 12px; background: #172130; }
+.status-line { display: flex; align-items: flex-start; gap: 9px; }
+.status-line p { margin: 0; line-height: 1.65; font-weight: 550; }
+.status-dot { flex: 0 0 7px; height: 7px; margin-top: 7px; border-radius: 50%; background: #8495ad; }
+.status-dot[data-tone="active"] { background: #7bb2ff; }
+.status-dot[data-tone="success"] { background: #77cda5; }
+.status-dot[data-tone="attention"] { background: #e4b572; }
+.status-note { margin: 9px 0 0 16px; color: #a5b5ca; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.updated { display: flex; justify-content: space-between; gap: 8px; margin: 13px 0 0; color: #8a9bb3; font-size: 11px; }
+.updated time { text-align: right; }
+.actions { display: grid; gap: 8px; margin-top: 14px; }
+button { min-height: 39px; border: 1px solid transparent; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; }
+.primary { background: #72a8f6; color: #0c1a2e; }
+.primary:hover:not(:disabled) { background: #91bdff; }
+.secondary { background: transparent; border-color: #344357; color: #b9c8db; }
+.secondary:hover:not(:disabled) { background: #1b293b; }
+button:disabled { cursor: default; opacity: .42; }
+button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid #a6ccff; outline-offset: 3px; }
+.notice { margin: 10px 0 0; color: #e4b572; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.schedule { margin-top: 20px; padding-bottom: 19px; border-bottom: 1px solid #273245; }
+.schedule-label { display: flex; align-items: center; justify-content: space-between; gap: 10px; line-height: 1.6; cursor: pointer; }
+.timezone { display: block; color: #8fa0b8; font-size: 11px; }
+.schedule p { margin: 9px 0 0; color: #8fa0b8; font-size: 11px; line-height: 1.6; }
+input[role="switch"] { appearance: none; flex: 0 0 34px; width: 34px; height: 20px; margin: 0; border: 1px solid #526178; border-radius: 20px; background: #354257; cursor: pointer; }
+input[role="switch"]::before { content: ""; display: block; width: 12px; height: 12px; margin: 3px; border-radius: 50%; background: #b9c6d8; }
+input[role="switch"]:checked { border-color: #72a8f6; background: #72a8f6; }
+input[role="switch"]:checked::before { transform: translateX(14px); background: #101f35; }
+input[role="switch"]:disabled { opacity: .45; cursor: default; }
+.games { margin-top: 18px; }
+.empty { margin: 0; color: #8193ad; font-size: 12px; line-height: 1.6; }
+#game-list { max-height: 224px; overflow-y: auto; margin: 0; padding: 0; list-style: none; }
+#game-list li { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid #202d3f; }
+#game-list li:first-child { padding-top: 0; border-top: 0; }
+.game-details { min-width: 0; }
+.game-title { color: #d2dff0; line-height: 1.5; overflow-wrap: anywhere; }
+.game-reason { display: block; margin-top: 4px; color: #8e9fb6; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+a.game-title { text-decoration: none; }
+a.game-title:hover { color: #9ec4ff; text-decoration: underline; }
+.game-state { flex-shrink: 0; padding-top: 2px; color: #8e9fb6; font-size: 11px; line-height: 1.5; }
+.game-state[data-tone="success"] { color: #87cfae; }
+.game-state[data-tone="attention"] { color: #dcb77f; }
+[hidden] { display: none !important; }

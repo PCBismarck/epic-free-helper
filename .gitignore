@@ -1,0 +1,34 @@
+# Local credentials and configuration
+.env
+.env.*
+!.env.example
+
+# Dependencies and generated output
+node_modules/
+/dist/
+/coverage/
+*.tsbuildinfo
+
+# Local execution reports, profiles, and browser caches
+.local/
+profiles/
+browser-profile/
+browser-profiles/
+chrome-profile/
+chromium-profile/
+edge-profile/
+playwright-report/
+test-results/
+.cache/
+
+# Logs and Python tooling caches
+*.log
+*.log.*
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
