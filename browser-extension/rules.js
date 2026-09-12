@@ -1,5 +1,4 @@
-// Shared pure rules copied from claimer/local/selection.mjs.
-// Pure, conservative rules for the isolated Epic weekly-PC claimer.
+// Pure rules for Epic weekly PC offers, ownership and zero-price checkout.
 export const PROMOTIONS_URL = 'https://store-site-backend-static-ipv4.ak.epicgames.com/freeGamesPromotions?locale=en-US';
 
 export function canonicalProductUrl(value) {

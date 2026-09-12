@@ -21,13 +21,9 @@ playwright-report/
 test-results/
 .cache/
 
-# Logs and Python tooling caches
+# Logs
 *.log
 *.log.*
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.venv/
 
 # Operating-system metadata
 .DS_Store

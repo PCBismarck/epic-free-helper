@@ -3,7 +3,7 @@
   "version": "1.0.2",
   "private": true,
   "type": "module",
-  "description": "Epic PC weekly free game helper for Chrome and Edge.",
+  "description": "面向 Windows Chrome / Edge 的 Epic 周免领取扩展，支持自动领取、已拥有跳过和定时检查。",
   "license": "AGPL-3.0-only",
   "engines": {
     "node": ">=22"
