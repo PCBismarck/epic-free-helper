@@ -52,7 +52,7 @@ function fixture(t, options = {}) {
   // Chrome serializes pageAction for injection; a fresh VM also ensures it
   // cannot accidentally rely on imports or other extension-module closures.
   const invoke = action => JSON.parse(JSON.stringify(runInNewContext(`(${pageAction.toString()})(action, game)`, {
-    action, game: GAME, URL, document, window: globalThis.window, location: globalThis.location,
+    action, game: options.game ?? GAME, URL, document, window: globalThis.window, location: globalThis.location,
     getComputedStyle: globalThis.getComputedStyle,
   })));
   return { document, itemCard, itemPrice: () => [...itemCard.children].filter(child => child.tagName === 'SPAN')[1],
@@ -219,3 +219,20 @@ test('a current signed-in zero-price Get still clicks exactly once', t => {
   assert.deepEqual(page.get(), { clicked: true });
   assert.equal(page.clicks(), 1);
 });
+
+const MINDCOP = {
+  title: 'Mindcop', url: 'https://store.epicgames.com/p/mindcop-78e6c1',
+  namespace: 'f20a4eda0f2d486ea73cab8af1224e31', id: '8a20c6c8d5b5417e800c687e9d72013e',
+};
+const LOCALIZED_CARD = readFileSync(new URL('./fixtures/free-checkout-localized-card.html', import.meta.url), 'utf8').trim();
+for (const [title, valid] of [['Mindcop', false], ['心灵警探', true], ['心灵警探 DLC', false]]) {
+  test(`captured localized checkout requires the exact official title: ${title}`, t => {
+    const game = { ...MINDCOP, title };
+    const page = fixture(t, { game, card: LOCALIZED_CARD,
+      url: CHECKOUT_URL.replace(GAME.namespace, game.namespace).replace(GAME.id, game.id) });
+    assert.equal(isVerifiedZeroCheckout(page.inspect().order, game), valid);
+    assert.equal(page.clicks(), 0);
+    assert.equal(page.submit().clicked === true, valid);
+    assert.equal(page.clicks(), valid ? 1 : 0);
+  });
+}

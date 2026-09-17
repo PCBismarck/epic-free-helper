@@ -153,6 +153,20 @@ async function stillFree(game) {
     current.id === game.id && current.namespace === game.namespace);
 }
 
+async function localizedCheckoutGame(game, order) {
+  const locale = new URL(order.checkoutUrl).searchParams.get('lang');
+  if (!locale || !/^[a-z]{2}(?:-[a-z]{2})?$/i.test(locale)) return null;
+  const endpoint = new URL(PROMOTIONS_URL);
+  endpoint.searchParams.set('locale', locale);
+  const response = await fetch(endpoint.href, { signal: AbortSignal.timeout(15000) });
+  if (!response.ok) return null;
+  // The translated name must come from the same currently free official offer,
+  // never from the checkout DOM or a fuzzy title comparison.
+  const localized = selectWeeklyPcGames(await response.json()).find(current =>
+    current.url === game.url && current.id === game.id && current.namespace === game.namespace);
+  return localized ? { ...game, title: localized.title } : null;
+}
+
 export async function claimGame(tabId, game, isCancelled = () => false) {
   const attention = reason => ({ status: 'needs_attention', reason });
   const check = () => { if (isCancelled()) throw new Error('cancelled'); };
@@ -163,7 +177,7 @@ export async function claimGame(tabId, game, isCancelled = () => false) {
     check();
     return frame ? { ...frame, frameId } : null;
   };
-  const read = async (frameId = 0, action = 'inspect', expectedDocumentId = null) => {
+  const read = async (frameId = 0, action = 'inspect', expectedDocumentId = null, orderGame = game) => {
     check();
     const tab = await chrome.tabs.get(tabId);
     check();
@@ -178,7 +192,7 @@ export async function claimGame(tabId, game, isCancelled = () => false) {
       if (root?.documentId !== productDocumentId || canonicalProductUrl(root?.url) !== game.url) return { refused: true };
     }
     check();
-    const state = await inspect(tabId, frame, game, action);
+    const state = await inspect(tabId, frame, orderGame, action);
     check();
     return state;
   };
@@ -299,8 +313,24 @@ export async function claimGame(tabId, game, isCancelled = () => false) {
           }
           if (checkout.challenge) return attention('结账要求安全验证，自动领取已暂停');
           if (!checkout.order) continue;
-          if (!isVerifiedZeroCheckout(checkout.order, game) || !await stillFree(game)) return attention('订单商品或零元结账未通过核验，已停止');
-          if (!(await read(frame.frameId, 'submit', checkout.documentId)).clicked) return attention('提交前订单状态变化，已停止');
+          let orderGame = game;
+          if (checkout.order.kind === 'free_checkout' && checkout.order.matchesTitle === false &&
+              isVerifiedZeroCheckout({ ...checkout.order, matchesTitle: true }, game)) {
+            // Only the title may differ: validate the exact offer, URL and zero
+            // amount before looking up its name in the checkout's language.
+            try { orderGame = await localizedCheckoutGame(game, checkout.order); }
+            catch { check(); return attention('无法从官方列表确认当前语言的商品名称，已停止'); }
+            check();
+            if (!orderGame) return attention('商品名称未匹配当前语言的官方周免记录，已停止');
+            try { checkout = await read(frame.frameId, 'inspect', checkout.documentId, orderGame); }
+            catch (error) {
+              if (!isNavigationReadError(error)) throw error;
+              continue;
+            }
+            if (checkout.challenge) return attention('结账要求安全验证，自动领取已暂停');
+          }
+          if (!isVerifiedZeroCheckout(checkout.order, orderGame) || !await stillFree(game)) return attention('订单商品或零元结账未通过核验，已停止');
+          if (!(await read(frame.frameId, 'submit', checkout.documentId, orderGame)).clicked) return attention('提交前订单状态变化，已停止');
           submitted = true;
           break;
         }

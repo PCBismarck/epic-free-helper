@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Epic 周免领取助手",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "自动检查并领取 Epic PC 周免游戏，支持已拥有游戏跳过和每日定时检查。",
   "minimum_chrome_version": "120",
   "permissions": ["alarms", "storage", "scripting", "webNavigation"],

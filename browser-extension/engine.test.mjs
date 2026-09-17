@@ -55,9 +55,12 @@ function harness(t, options = {}) {
   });
   t.mock.method(AbortSignal, 'timeout', () => new AbortController().signal);
   t.mock.method(globalThis, 'fetch', async (url, request) => {
-    assert.equal(url, PROMOTIONS_URL, 'only the mocked official promotion endpoint is requested');
+    assert.ok(url === PROMOTIONS_URL || (options.localized &&
+      url === PROMOTIONS_URL.replace('locale=en-US', 'locale=zh-CN')),
+    'only the mocked official promotion endpoint and explicit checkout locale are requested');
     assert.ok(request.signal instanceof AbortSignal);
     h.fetches.push(url);
+    if (url !== PROMOTIONS_URL) return options.localized(h);
     if (options.fetch) return options.fetch(h);
     const prices = options.apiPrices || [0];
     const price = prices[Math.min(h.fetches.length - 1, prices.length - 1)];
@@ -104,7 +107,7 @@ function harness(t, options = {}) {
         assert.ok(Number.isInteger(frameId), 'injection document must have been observed through getFrame');
         const [action, game] = request.args;
         assert.equal(game.url, GAME.url);
-        h.injections.push({ frameId, documentId, action, navigation: h.navigations.length, at: h.now });
+        h.injections.push({ frameId, documentId, action, title: game.title, navigation: h.navigations.length, at: h.now });
         if (action === 'inspect' && frameId === 0 && h.navigations.length === 1 && !h.getAttempts) h.initialReads++;
         if (options.injectionError) { const error = options.injectionError(h, action, frameId); if (error) throw error; }
         let result;
@@ -118,7 +121,7 @@ function harness(t, options = {}) {
           if (result.clicked) h.submitClicks++;
         } else {
           assert.equal(action, 'inspect');
-          result = options.inspect ? options.inspect(h, frameId, defaultInspect) : defaultInspect(frameId);
+          result = options.inspect ? options.inspect(h, frameId, defaultInspect, game) : defaultInspect(frameId);
         }
         return [{ frameId, documentId: options.resultDocumentId ? options.resultDocumentId(h, documentId, action) : documentId, result }];
       },
@@ -627,5 +630,105 @@ test('checkout document replacement immediately before Submit never clicks the r
     ? { ...fallback(frameId), documentId: 'replacement-checkout-document' } : fallback(frameId) });
   assert.equal((await h.run()).status, 'failed');
   assert.equal(h.getAttempts, 1);
+  assert.equal(h.submitAttempts, 0);
+});
+
+
+const LOCAL_TITLE = '心灵警探';
+const LOCAL_CHECKOUT = `https://store.epicgames.com/purchase?lang=zh-CN&offers=1-${GAME.namespace}-${GAME.id}--#/free-checkout`;
+function localizedPayload(change = () => {}) {
+  const data = apiPayload();
+  const item = data.data.Catalog.searchStore.elements[0];
+  item.title = LOCAL_TITLE;
+  change(item);
+  return data;
+}
+function localizedOptions(extra = {}) {
+  return {
+    localized: async () => ({ ok: true, json: async () => localizedPayload() }),
+    inspect: (state, frameId, fallback, expectedGame) => frameId === 1 ? freeCheckoutOrder({
+      checkoutUrl: LOCAL_CHECKOUT, matchesTitle: expectedGame.title === LOCAL_TITLE,
+    }) : fallback(frameId),
+    ...extra,
+  };
+}
+
+test('localized checkout resolves the exact official offer then rechecks its DOM and submits once', async t => {
+  const h = harness(t, localizedOptions());
+  assert.equal((await h.run()).status, 'claimed');
+  assert.deepEqual(h.fetches, [PROMOTIONS_URL, PROMOTIONS_URL.replace('en-US', 'zh-CN'), PROMOTIONS_URL]);
+  assert.equal(h.getClicks, 1);
+  assert.equal(h.submitClicks, 1);
+  assert.equal(h.injections.find(x => x.action === 'submit').title, LOCAL_TITLE);
+  assert.equal(h.navigations.length, 2, 'a fresh product navigation must confirm ownership');
+});
+
+for (const [name, change] of [
+  ['another offer ID', item => { item.id = 'other-offer'; }],
+  ['another namespace', item => { item.namespace = 'other-namespace'; }],
+  ['another product URL', item => { item.catalogNs.mappings[0].pageSlug = 'other-product'; }],
+  ['a paid offer', item => { item.price.totalPrice.discountPrice = 1; }],
+  ['an expired promotion', item => { item.promotions.promotionalOffers[0].promotionalOffers[0].endDate = '2026-09-11T00:00:00Z'; }],
+  ['an unrelated localized title', item => { item.title = 'Different Game'; }],
+]) {
+  test(`localized title lookup never authorizes ${name}`, async t => {
+    const h = harness(t, localizedOptions({ localized: async () => ({ ok: true, json: async () => localizedPayload(change) }) }));
+    assert.equal((await h.run()).status, 'needs_attention');
+    assert.equal(h.getClicks, 1);
+    assert.equal(h.submitAttempts, 0);
+  });
+}
+
+for (const [name, order] of [
+  ['nonzero price', { itemPriceText: '¥1.00' }],
+  ['wrong checkout offer', { checkoutUrl: LOCAL_CHECKOUT.replace(GAME.id, 'other-offer') }],
+  ['missing free-content notice', { hasFreeContent: false }],
+  ['unknown query parameter', { checkoutUrl: LOCAL_CHECKOUT.replace('#', '&cartId=other#') }],
+  ['missing locale', { checkoutUrl: LOCAL_CHECKOUT.replace('lang=zh-CN&', '') }],
+  ['invalid locale', { checkoutUrl: LOCAL_CHECKOUT.replace('zh-CN', 'zh-CN-unknown') }],
+]) {
+  test(`localized mismatch with ${name} stops without a localization request or submit`, async t => {
+    const h = harness(t, localizedOptions({ inspect: (state, frameId, fallback) => frameId === 1
+      ? freeCheckoutOrder({ checkoutUrl: LOCAL_CHECKOUT, matchesTitle: false, ...order }) : fallback(frameId) }));
+    assert.equal((await h.run()).status, 'needs_attention');
+    assert.equal(h.fetches.length, 1);
+    assert.equal(h.submitAttempts, 0);
+  });
+}
+
+for (const [name, localized] of [
+  ['HTTP failure', async () => ({ ok: false })],
+  ['network failure', async () => { throw new Error('mock timeout'); }],
+  ['invalid JSON', async () => ({ ok: true, json: async () => { throw new Error('invalid JSON'); } })],
+]) {
+  test(`localized lookup ${name} pauses before submission`, async t => {
+    const h = harness(t, localizedOptions({ localized }));
+    assert.equal((await h.run()).status, 'needs_attention');
+    assert.equal(h.submitAttempts, 0);
+  });
+}
+
+test('cancellation during localized lookup stops before reinspection or submit', async t => {
+  const h = harness(t, localizedOptions({ localized: async state => {
+    state.cancelled = true;
+    return { ok: true, json: async () => localizedPayload() };
+  } }));
+  assert.equal((await h.run()).status, 'failed');
+  assert.equal(h.submitAttempts, 0);
+  assert.equal(h.injections.some(x => x.title === LOCAL_TITLE), false);
+});
+
+test('price changes while resolving the localized title are rejected by the fresh DOM read', async t => {
+  const h = harness(t, localizedOptions({ inspect: (state, frameId, fallback, expectedGame) => frameId === 1
+    ? freeCheckoutOrder({ checkoutUrl: LOCAL_CHECKOUT, matchesTitle: expectedGame.title === LOCAL_TITLE,
+      itemPriceText: expectedGame.title === LOCAL_TITLE ? '¥1.00' : '¥0.00' }) : fallback(frameId) }));
+  assert.equal((await h.run()).status, 'needs_attention');
+  assert.equal(h.submitAttempts, 0);
+});
+
+test('final eligibility recheck still blocks an offer that became paid after localized matching', async t => {
+  const h = harness(t, localizedOptions({ apiPrices: [0, 0, 1] }));
+  assert.equal((await h.run()).status, 'needs_attention');
+  assert.equal(h.fetches.length, 3);
   assert.equal(h.submitAttempts, 0);
 });
