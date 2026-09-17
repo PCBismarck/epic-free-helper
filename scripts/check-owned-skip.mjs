@@ -170,6 +170,7 @@ async function check() {
     globalThis.fetch = async input => {
       const url = typeof input === 'string' ? input : input?.url || String(input);
       if (url !== expectedUrl) throw new Error(`Unexpected worker fetch: ${url}`);
+      if (globalThis.__simulatePromotionsFailure) throw new Error('Simulated promotions outage');
       globalThis.__ownedSkipPromotionsReads++;
       return new Response(JSON.stringify(payload), {
         status: 200, headers: { 'Content-Type': 'application/json' },
@@ -184,10 +185,27 @@ async function check() {
   assert.equal(latestState.status.state, 'idle', 'The empty test profile must start idle');
   assert.equal(latestState.settings.enabled, false, 'Scheduling must start disabled');
   assert.equal(latestState.job, null, 'The empty test profile must not contain a job');
+  const toolbar = () => worker.evaluate(async () => ({
+    text: await chrome.action.getBadgeText({}), color: await chrome.action.getBadgeBackgroundColor({}),
+    title: await chrome.action.getTitle({}),
+  }));
+  const waitBadge = async text => {
+    const deadline = Date.now() + 4000;
+    let badge;
+    do {
+      badge = await toolbar();
+      if (badge.text === text) return badge;
+      await delay(100);
+    } while (Date.now() < deadline);
+    assert.equal(badge.text, text, 'Toolbar must follow the saved task state');
+  };
+  assert.equal((await toolbar()).text, '');
 
   // Exercise the shipped popup, message handler, background orchestration,
   // page engine and real Chrome extension APIs without patching any of them.
   await page.click('#run-button');
+  const runningBadge = await waitBadge('…');
+  assert.deepEqual(runningBadge.color, [37, 99, 235, 255]);
   while (true) {
     latestState = await worker.evaluate(() => chrome.storage.local.get(['settings', 'status', 'job']));
     if (latestState.status.state !== 'idle' && !latestState.status.running) break;
@@ -207,6 +225,26 @@ async function check() {
   assert.deepEqual(await worker.evaluate(() => chrome.alarms.getAll()), [], 'No daily or deadline alarm may remain');
   assert.equal(context.pages().some(open => fixtures.some(game => open.url() === game.url)), false,
     'The extension must close its completed task tab');
+  const successBadge = await waitBadge('✓');
+  assert.deepEqual(successBadge.color, [21, 128, 61, 255]);
+  assert.match(successBadge.title, /全部确认在库（2 款）/);
+
+  // A later scheduled run can fail before discovering games. The real popup,
+  // worker and action APIs must replace the previous green badge with red.
+  await worker.evaluate(() => { globalThis.__simulatePromotionsFailure = true; });
+  await page.click('#run-button');
+  const failureBadge = await waitBadge('!');
+  assert.deepEqual(failureBadge.color, [220, 38, 38, 255]);
+  assert.match(failureBadge.title, /需要处理/);
+  assert.match(failureBadge.title, /每日定时已关闭/);
+  const failedState = await worker.evaluate(() => chrome.storage.local.get(['status', 'job']));
+  assert.equal(failedState.status.state, 'failed');
+  assert.equal(failedState.job, null);
+  await page.close();
+  const reopened = await context.newPage();
+  await reopened.goto(`${extensionOrigin}/popup.html`);
+  await reopened.waitForFunction(() => !document.getElementById('run-button').disabled);
+  assert.equal((await toolbar()).text, '!', 'Opening the popup must not dismiss unresolved failures');
   assert.deepEqual(errors, [], 'The fixture and popup must not raise browser errors');
   report = {
     state: 'owned_skip_verified', popup: 'passed', extensionVersion: await worker.evaluate(() => chrome.runtime.getManifest().version),
@@ -214,6 +252,7 @@ async function check() {
     fixtureNavigations: navigations, ctaClicks: clicks, fixtureEvents: events,
     eventTransport: 'locally intercepted sendBeacon', job: latestState.job,
     timerEnabled: latestState.settings.enabled,
+    toolbar: { running: runningBadge, success: successBadge, failure: failureBadge, failurePersistsAfterPopupReopen: true },
     fixtureApiReads: await worker.evaluate(() => globalThis.__ownedSkipPromotionsReads),
     externalClaimRequests: 'none; page requests intercepted and worker fetch replaced with fixtures',
     blockedRequests: [...blockedRequests], limits, time: new Date().toISOString(),

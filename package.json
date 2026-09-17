@@ -1,6 +1,6 @@
 {
   "name": "epic-free-helper",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "private": true,
   "type": "module",
   "description": "面向 Windows Chrome / Edge 的 Epic 周免领取扩展，支持自动领取、已拥有跳过和定时检查。",

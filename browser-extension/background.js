@@ -32,6 +32,54 @@ async function readState() {
   return { settings: normalizeSettings(data.settings), status: { ...EMPTY_STATUS, ...data.status }, job: data.job || null };
 }
 
+async function updateToolbar({ status, settings }) {
+  const games = Array.isArray(status.games) ? status.games : [];
+  const successful = game => ['claimed', 'already_owned'].includes(game?.status);
+  const attention = value => ['failed', 'needs_login', 'needs_attention', 'interrupted'].includes(value);
+  const completed = games.filter(successful).length;
+  const problem = games.find(game => attention(game?.status));
+  let text = '', color = '#64748b', label = '尚未运行';
+  if (status.running || status.state === 'running') {
+    text = '…'; color = '#2563eb'; label = `正在检查（已确认 ${completed}/${games.length} 款）`;
+  } else if (attention(status.state) || problem) {
+    text = '!'; color = '#dc2626'; label = '领取未完成，需要处理';
+  } else if (['claimed', 'already_owned'].includes(status.state)) {
+    // A single successful game must never hide an unconfirmed game.
+    if (games.length && completed === games.length) {
+      text = '✓'; color = '#15803d'; label = `最近一轮全部确认在库（${completed} 款）`;
+    } else {
+      text = '!'; color = '#dc2626'; label = '领取结果不完整，需要检查';
+    }
+  } else if (status.state === 'stopped' || status.state === 'no_free_games') {
+    text = '–'; color = '#a16207';
+    label = status.state === 'stopped' ? '任务已停止，未确认全部领取' : '本轮没有符合条件的周免游戏';
+  }
+  const detail = problem
+    ? [problem.title, problem.reason].filter(value => typeof value === 'string').join('：')
+    : status.note;
+  const when = status.updatedAt ? new Date(status.updatedAt) : null;
+  const updated = when && Number.isFinite(when.getTime())
+    ? `最近更新：${new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai',
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(when)}` : '';
+  const title = ['Epic 周免领取助手', label, typeof detail === 'string' ? detail.slice(0, 300) : '', updated,
+    settings.enabled ? '每日定时已开启' : '每日定时已关闭', '点击查看每款游戏的结果'].filter(Boolean).join('\n');
+  // Global action state survives popup closure and is restored at worker start.
+  // A toolbar API failure must not interrupt saving or completing a claim.
+  try {
+    await Promise.allSettled([
+      chrome.action.setBadgeBackgroundColor({ color }),
+      chrome.action.setBadgeTextColor({ color: '#ffffff' }),
+      chrome.action.setTitle({ title }),
+    ]);
+    await chrome.action.setBadgeText({ text });
+  } catch { /* Claim state remains available in the popup. */ }
+}
+
+async function saveState(changes) {
+  await chrome.storage.local.set(changes);
+  if (changes.status || changes.settings) await updateToolbar(await readState());
+}
+
 async function response(ok = true, error) {
   const { settings, status, job } = await readState();
   return { ok, settings, status, job, ...(error ? { error } : {}) };
@@ -94,7 +142,7 @@ async function initialize() {
     status = { ...status, state: 'interrupted', note: '上次任务状态不完整，已停止且关闭定时。', running: false, tabId: null, updatedAt: new Date().toISOString() };
   }
   status = await syncSchedule(settings, status);
-  await chrome.storage.local.set({ settings, status, job });
+  await saveState({ settings, status, job });
 }
 
 const ready = exclusive(initialize);
@@ -108,7 +156,7 @@ async function saveProgress(run, note) {
     if (cancelled(run)) return false;
     const data = await readState();
     if (data.job?.runId !== run.runId) return false;
-    await chrome.storage.local.set({
+    await saveState({
       job: { ...data.job, tabId: run.tabId, games: run.games },
       status: { ...data.status, note, games: run.games, updatedAt: new Date().toISOString() },
     });
@@ -134,7 +182,7 @@ async function finishRun(run, state, note, keepTab = false) {
       running: false, updatedAt: new Date().toISOString(),
       tabId: preserve ? data.job.tabId : null,
     });
-    await chrome.storage.local.set({
+    await saveState({
       settings: data.settings, status,
       job: preserve ? { ...data.job, phase: 'manual', games: run.games } : null,
     });
@@ -172,7 +220,7 @@ async function executeRun(run) {
       run.tabId = tab.id;
       try {
         // Persist the returned ID immediately, before navigating or claiming.
-        await chrome.storage.local.set({ job: { ...data.job, tabId: tab.id, games: run.games } });
+        await saveState({ job: { ...data.job, tabId: tab.id, games: run.games } });
       } catch (error) {
         await closeRecordedTab({ sessionId, tabId: tab.id });
         throw error;
@@ -217,7 +265,7 @@ async function startRun(source) {
   if (activeRun || data.status.running) return response(false, '本轮仍在运行，请等待或先点“停止”。');
   if (data.job) {
     if (data.job.phase === 'manual' && !await recordedTabExists(data.job)) {
-      await chrome.storage.local.set({ job: null, status: { ...data.status, tabId: null } });
+      await saveState({ job: null, status: { ...data.status, tabId: null } });
     } else return response(false, '仍有待处理的领取页或中断记录。请关闭领取页，或点“停止”后再试。');
   }
   if (source === 'scheduled' && !data.settings.enabled) return response();
@@ -225,7 +273,7 @@ async function startRun(source) {
   const run = { runId: crypto.randomUUID(), startedAt: now, deadline: now + RUN_LIMIT_MS, tabId: null, games: [], cancelled: false, timer: null, abort: null };
   activeRun = run;
   try {
-    await chrome.storage.local.set({
+    await saveState({
       job: { runId: run.runId, sessionId, phase: 'running', source, startedAt: now, deadline: run.deadline, tabId: null, games: [] },
       status: { ...data.status, state: 'running', note: '正在读取 Epic 官方周免列表。', games: [], running: true, updatedAt: new Date().toISOString(), tabId: null },
     });
@@ -243,7 +291,7 @@ async function startRun(source) {
     await chrome.alarms.clear(`${DEADLINE_PREFIX}${run.runId}`);
     data.settings.enabled = false;
     const status = await syncSchedule(data.settings, { ...data.status, state: 'failed', note: '任务未能启动，已停止并关闭定时。', running: false, tabId: null, updatedAt: new Date().toISOString() });
-    await chrome.storage.local.set({ settings: data.settings, status, job: null });
+    await saveState({ settings: data.settings, status, job: null });
     activeRun = null;
     throw error;
   }
@@ -263,7 +311,7 @@ async function stopRun() {
     ...data.status, state: 'stopped', note: '已停止，定时已关闭。', running: false,
     tabId: null, updatedAt: new Date().toISOString(),
   });
-  await chrome.storage.local.set({ settings: data.settings, status, job: null });
+  await saveState({ settings: data.settings, status, job: null });
   activeRun = null;
   return response();
 }
@@ -287,7 +335,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     data.settings.enabled = message.enabled;
     const status = await syncSchedule(data.settings, data.status, true);
-    await chrome.storage.local.set({ settings: data.settings, status });
+    await saveState({ settings: data.settings, status });
     return response();
   })).then(sendResponse).catch(() => sendResponse({ ok: false, error: '扩展状态保存失败，请重新打开扩展并检查浏览器。' }));
   return true;
@@ -301,7 +349,7 @@ chrome.alarms.onAlarm.addListener(alarm => {
         if (!data.settings.enabled) return;
         // Always schedule the next Beijing evening, never repeat missed days.
         const status = await syncSchedule(data.settings, data.status, true);
-        await chrome.storage.local.set({ status });
+        await saveState({ status });
         await startRun('scheduled');
       });
     } else if (alarm.name.startsWith(DEADLINE_PREFIX)) {
@@ -327,7 +375,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
       data.status = { ...data.status, state: 'stopped', note: '领取页已关闭，本轮停止且定时已关闭。', running: false };
     }
     const status = await syncSchedule(data.settings, { ...data.status, tabId: null, updatedAt: new Date().toISOString() });
-    await chrome.storage.local.set({ settings: data.settings, status, job: null });
+    await saveState({ settings: data.settings, status, job: null });
   })).catch(() => {});
 });
 
