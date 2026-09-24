@@ -133,6 +133,9 @@ async function inspect(tabId, frame, game, action = 'inspect') {
   if (!frame?.documentId) throw new Error('missing_document_id');
   const results = await chrome.scripting.executeScript({
     target: { tabId, documentIds: [frame.documentId] }, func: pageAction, args: [action, game],
+    // Poll the actual login/CTA state without waiting for document_idle or
+    // unrelated media to finish loading. Mutations still recheck live evidence.
+    injectImmediately: true,
   });
   const result = results[0];
   if (results.length !== 1 || result?.documentId !== frame.documentId || result.frameId !== frame.frameId) {
@@ -167,9 +170,10 @@ async function localizedCheckoutGame(game, order) {
   return localized ? { ...game, title: localized.title } : null;
 }
 
-export async function claimGame(tabId, game, isCancelled = () => false) {
+export async function claimGame(tabId, game, isCancelled = () => false, onProgress = async () => {}) {
   const attention = reason => ({ status: 'needs_attention', reason });
   const check = () => { if (isCancelled()) throw new Error('cancelled'); };
+  const progress = async note => { check(); await onProgress(note); check(); };
   let productDocumentId = null;
   const frameAt = async (frameId = 0) => {
     check();
@@ -206,10 +210,11 @@ export async function claimGame(tabId, game, isCancelled = () => false) {
     return oldDocumentId;
   };
   const waitPage = async ({ oldDocumentId = null, ownedOnly = false, expectedDocumentId = null } = {}) => {
-    const deadline = Date.now() + 35000;
+    const deadline = Date.now() + 60000;
     let stable = null;
     let sawOwned = false;
     let loggedOut = false;
+    let lastState = null;
     while (Date.now() < deadline) {
       check();
       let state = null;
@@ -228,6 +233,7 @@ export async function claimGame(tabId, game, isCancelled = () => false) {
       } catch (error) {
         if (!isNavigationReadError(error)) throw error;
       }
+      lastState = state;
       if (state?.challenge || state?.needsLogin) return state;
       if (!state || canonicalProductUrl(state.url) !== game.url) {
         stable = null;
@@ -254,9 +260,20 @@ export async function claimGame(tabId, game, isCancelled = () => false) {
       await delay(750);
     }
     if (loggedOut) throw new Error('needs_login');
-    throw new Error('page_timeout');
+    const error = new Error('page_timeout');
+    error.reason = !lastState || canonicalProductUrl(lastState.url) !== game.url
+      ? '等待 60 秒后仍未读到当前商品页，已停止；请检查页面是否加载完成'
+      : lastState.loggedIn !== 'true'
+        ? '等待 60 秒后登录状态仍未就绪，已停止；请检查 Epic 登录状态'
+        : sawOwned
+          ? '已出现拥有状态，但未能持续确认；已停止且没有重复领取'
+          : !lastState.cta
+            ? '等待 60 秒后商品按钮仍未加载，已停止；请检查页面或网络'
+            : '等待 60 秒后商品按钮仍未稳定，已停止；请查看保留的页面';
+    throw error;
   };
   const verify = async () => {
+    await progress('正在重新打开商品页确认入库');
     const oldDocumentId = await navigate();
     try {
       const state = await waitPage({ oldDocumentId, ownedOnly: true });
@@ -277,6 +294,7 @@ export async function claimGame(tabId, game, isCancelled = () => false) {
     if (canonicalProductUrl(state.url) !== game.url) return attention('商品页发生了未识别的跳转');
     if (state.ownedConfirmed) return { status: 'already_owned' };
     if (!isAllowedFreeCta(state.cta) || !state.freeTexts?.some(isZeroPriceText) || !await stillFree(game)) return attention('没有确认当前商品仍为零元，已停止');
+    await progress('商品已通过零元检查，正在打开结账');
     const clicked = await read(0, 'get', state.documentId);
     if (clicked.needsLogin) throw new Error('needs_login');
     if (clicked.owned) {
@@ -286,7 +304,8 @@ export async function claimGame(tabId, game, isCancelled = () => false) {
     }
     if (!clicked.clicked) return attention('领取按钮或免费价格发生变化，已停止');
 
-    const deadline = Date.now() + 45000;
+    await progress('已点击获取，正在等待结账页；尚未提交订单');
+    const deadline = Date.now() + 60000;
     let submitted = false;
     while (Date.now() < deadline) {
       check();
@@ -330,18 +349,22 @@ export async function claimGame(tabId, game, isCancelled = () => false) {
             if (checkout.challenge) return attention('结账要求安全验证，自动领取已暂停');
           }
           if (!isVerifiedZeroCheckout(checkout.order, orderGame) || !await stillFree(game)) return attention('订单商品或零元结账未通过核验，已停止');
+          await progress('订单已通过零元检查，正在提交');
           if (!(await read(frame.frameId, 'submit', checkout.documentId, orderGame)).clicked) return attention('提交前订单状态变化，已停止');
           submitted = true;
+          await progress('已提交一次订单，正在等待入库；不会重复提交');
           break;
         }
       }
       await delay(900);
     }
-    // One final product reload verifies ownership; never resubmit the order.
+    if (!submitted) return attention('点击获取后 60 秒内未找到可核验的结账页，未提交订单；已保留原页面，请检查是否有验证、弹窗或加载错误');
+    // Only a submitted order needs a final ownership reload. Preserve the
+    // original page when checkout never became usable, including any challenge.
     return await verify() ? { status: 'claimed' } : attention('尚未确认入库，请在保留的标签页查看');
   } catch (error) {
     if (error.message === 'needs_login') return { status: 'needs_login', reason: '请在 Windows 浏览器登录 Epic 后重新运行' };
-    if (error.message === 'page_timeout') return attention('页面状态未稳定，请在保留的标签页查看');
+    if (error.message === 'page_timeout') return attention(error.reason || '页面状态未稳定，请在保留的标签页查看');
     return { status: 'failed', reason: error.message === 'cancelled' ? '本次任务已停止' : '页面未完成或状态无法核验；没有重复提交' };
   }
 }

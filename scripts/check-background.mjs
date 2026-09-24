@@ -121,4 +121,15 @@ await test('toolbar API rejection cannot turn a completed claim into a failure',
   assert.deepEqual(m.removed,[100]);
  }
 });
+await test('engine progress is persisted for the popup and toolbar before a manual pause',async()=>{
+ let finish;const m=await make({engine:async(tab,current,cancelled,progress)=>{
+  await progress('已点击获取，尚未提交订单');
+  return new Promise(resolve=>{finish=resolve;});
+ }});
+ await m.message('runNow');await m.settle();
+ assert.match(m.local.status.note,/Test game：已点击获取/);
+ assert.match(m.toolbar.title,/尚未提交订单/);
+ finish({status:'needs_attention',reason:'checkout not ready'});await m.settle();
+ assert.equal(m.local.status.state,'needs_attention');assert.equal(m.toolbar.text,'!');
+});
 console.log(`Passed ${count} mocked lifecycle checks; no browser was launched.`);

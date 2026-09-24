@@ -82,14 +82,15 @@ function html(game) {
           emit({ kind: 'click', action: 'submit', label: target.innerText });
         }
       }, true);
-      // Epic briefly exposes logged-out/Get placeholders before ownership loads.
-      setTimeout(() => document.querySelector('egs-navigation').setAttribute('isloggedin', 'true'), 450);
+      // The first fixture deliberately hydrates after the former 35-second
+      // deadline. It must still skip ownership without any Get/Submit click.
+      setTimeout(() => document.querySelector('egs-navigation').setAttribute('isloggedin', 'true'), ${game.slug === 'skip-fixture-one' ? 45000 : 450});
       setTimeout(() => {
         const button = document.querySelector('[data-testid="purchase-cta-button"]');
         button.innerText = '已在库中';
         button.disabled = true;
         emit({ kind: 'owned' });
-      }, 2000);
+      }, ${game.slug === 'skip-fixture-one' ? 45000 : 2000});
     </script></body></html>`;
 }
 
@@ -262,7 +263,7 @@ async function check() {
 try {
   await Promise.race([
     check(),
-    new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Check exceeded 43 seconds')), 43000); }),
+    new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Check exceeded 63 seconds')), 63000); }),
   ]);
 } catch (error) {
   process.exitCode = 1;

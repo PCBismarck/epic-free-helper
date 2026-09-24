@@ -230,7 +230,8 @@ async function executeRun(run) {
     if (!created) return;
     for (const game of run.games) {
       if (!await saveProgress(run, `正在检查：${game.title}`)) return;
-      const result = await claimGame(run.tabId, game, () => cancelled(run));
+      const result = await claimGame(run.tabId, game, () => cancelled(run),
+        note => saveProgress(run, `${game.title}：${note}`));
       if (cancelled(run)) return;
       if (!['claimed', 'already_owned', 'needs_login', 'needs_attention', 'failed'].includes(result?.status)) throw new Error('invalid_engine_result');
       game.status = result.status;

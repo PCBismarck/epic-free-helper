@@ -100,6 +100,7 @@ function harness(t, options = {}) {
     scripting: {
       executeScript: async request => {
         assert.equal(request.target.tabId, TAB_ID);
+        assert.equal(request.injectImmediately, true, 'page-state polling must not wait for document_idle');
         assert.equal(request.target.frameIds, undefined, 'injections pin a document, never a reusable frame ID');
         assert.equal(request.target.documentIds.length, 1);
         const documentId = request.target.documentIds[0];
@@ -143,7 +144,7 @@ function harness(t, options = {}) {
       },
     },
   };
-  h.run = () => claimGame(TAB_ID, GAME, () => h.cancelled);
+  h.run = () => claimGame(TAB_ID, GAME, () => h.cancelled, options.progress);
   return h;
 }
 
@@ -209,7 +210,7 @@ test('already-owned is confirmed in the newly opened document without an extra r
 test('an ownership flash that stays Get is unconfirmed at the page deadline without clicking', async t => {
   const h = harness(t, { initial: state => state.initialReads === 1 ? owned() : product() });
   assert.equal((await h.run()).status, 'needs_attention');
-  assert.ok(h.now - NOW >= 35000 && h.now - NOW < 36000);
+  assert.ok(h.now - NOW >= 60000 && h.now - NOW < 61000);
   assert.equal(h.getAttempts + h.submitAttempts, 0);
 });
 
@@ -241,7 +242,7 @@ for (const [name, loadingStates] of [
 test('Get throughout fresh verification remains unconfirmed without further clicks', async t => {
   const h = harness(t, { afterGet: () => owned(), verify: () => product() });
   assert.equal((await h.run()).status, 'needs_attention');
-  assert.ok(h.now - NOW >= 38000 && h.now - NOW < 39000);
+  assert.ok(h.now - NOW >= 63000 && h.now - NOW < 64000);
   assert.equal(h.getAttempts, 1);
   assert.equal(h.submitAttempts, 0);
 });
@@ -304,7 +305,7 @@ for (const [name, blockedState, status] of [
 test('a persistently logged-out current account needs login without any clicks', async t => {
   const h = harness(t, { initial: product({ loggedIn: 'false' }) });
   assert.equal((await h.run()).status, 'needs_login');
-  assert.ok(h.now - NOW >= 35000 && h.now - NOW < 36000);
+  assert.ok(h.now - NOW >= 60000 && h.now - NOW < 61000);
   assert.equal(h.getAttempts + h.submitAttempts, 0);
 });
 
@@ -511,7 +512,7 @@ for (const [name, initial] of [
   test(`${name} cannot be treated as owned or clicked`, async t => {
     const h = harness(t, { initial });
     assert.equal((await h.run()).status, 'needs_attention');
-    assert.ok(h.now - NOW >= 35000 && h.now - NOW < 36000);
+    assert.ok(h.now - NOW >= 60000 && h.now - NOW < 61000);
     assert.equal(h.getAttempts + h.submitAttempts, 0);
   });
 }
@@ -526,7 +527,7 @@ test('an explicit initial login page stops immediately without polling or clicki
 test('a persistently logged-out fresh verification reports needs_login without another click', async t => {
   const h = harness(t, { afterGet: () => owned(), verify: () => product({ loggedIn: 'false' }) });
   assert.equal((await h.run()).status, 'needs_login');
-  assert.ok(h.now - NOW >= 38000 && h.now - NOW < 39000);
+  assert.ok(h.now - NOW >= 63000 && h.now - NOW < 64000);
   assert.equal(h.getAttempts, 1);
   assert.equal(h.submitAttempts, 0);
 });
@@ -536,7 +537,7 @@ test('a navigation that never leaves the previous document times out without ins
     ...fallback(frameId), documentId: 'document-0-0',
   }) });
   assert.equal((await h.run()).status, 'needs_attention');
-  assert.ok(h.now - NOW >= 35000 && h.now - NOW < 36000);
+  assert.ok(h.now - NOW >= 60000 && h.now - NOW < 61000);
   assert.equal(h.injections.length, 0);
 });
 
@@ -544,7 +545,7 @@ test('missing frame document IDs are never accepted or injected into', async t =
   const h = harness(t, { initial: owned(), frame: (state, frameId, fallback) => state.navigations.length
     ? { ...fallback(frameId), documentId: undefined } : fallback(frameId) });
   assert.equal((await h.run()).status, 'needs_attention');
-  assert.ok(h.now - NOW >= 35000 && h.now - NOW < 36000);
+  assert.ok(h.now - NOW >= 60000 && h.now - NOW < 61000);
   assert.equal(h.injections.length, 0);
 });
 
@@ -552,7 +553,7 @@ for (const [name, returnedId] of [['missing', undefined], ['mismatched', 'wrong-
   test(`${name} injection document IDs cannot prove ownership or authorize clicks`, async t => {
     const h = harness(t, { initial: owned(), resultDocumentId: () => returnedId });
     assert.equal((await h.run()).status, 'needs_attention');
-    assert.ok(h.now - NOW >= 35000 && h.now - NOW < 36000);
+    assert.ok(h.now - NOW >= 60000 && h.now - NOW < 61000);
     assert.equal(h.getAttempts + h.submitAttempts, 0);
   });
 }
@@ -731,4 +732,54 @@ test('final eligibility recheck still blocks an offer that became paid after loc
   assert.equal((await h.run()).status, 'needs_attention');
   assert.equal(h.fetches.length, 3);
   assert.equal(h.submitAttempts, 0);
+});
+
+for (const [name, loading] of [
+  ['login hydration', product({ loggedIn: null })],
+  ['product button hydration', product({ cta: '', ready: false })],
+]) {
+  test(`an owned game that needs 45 seconds for ${name} is skipped without any claim`, async t => {
+    const h = harness(t, { initial: state => state.now - NOW < 45000 ? loading : owned() });
+    assert.equal((await h.run()).status, 'already_owned');
+    assert.equal(h.getAttempts + h.submitAttempts, 0);
+    assert.equal(h.navigations.length, 1);
+    assert.ok(h.now - NOW >= 46500 && h.now - NOW < 60000);
+  });
+}
+for (const [name, initial, reason] of [
+  ['login unknown', product({ loggedIn: null }), /登录状态仍未就绪/],
+  ['CTA missing', product({ cta: '', ready: false }), /商品按钮仍未加载/],
+  ['CTA disabled', product({ ready: false }), /商品按钮仍未稳定/],
+]) {
+  test(`readiness timeout explains ${name} and never clicks`, async t => {
+    const h = harness(t, { initial });
+    const result = await h.run();
+    assert.equal(result.status, 'needs_attention');
+    assert.match(result.reason, reason);
+    assert.equal(h.getAttempts + h.submitAttempts, 0);
+  });
+}
+
+test('missing checkout preserves its page and never reloads away a possible challenge', async t => {
+  const notes=[];
+  const h=harness(t,{frames:[{frameId:0,url:GAME.url}],progress:async note=>notes.push(note)});
+  const result=await h.run();
+  assert.equal(result.status,'needs_attention');
+  assert.match(result.reason,/未提交订单.*保留原页面/);
+  assert.equal(h.navigations.length,1);
+  assert.equal(h.getClicks,1);assert.equal(h.submitAttempts,0);
+  assert.ok(notes.some(note=>/已点击获取/.test(note)));
+  assert.equal(notes.some(note=>/已提交一次/.test(note)),false);
+});
+test('checkout stages report one submission and final ownership verification', async t => {
+  const notes=[];const h=harness(t,{progress:async note=>notes.push(note)});
+  assert.equal((await h.run()).status,'claimed');
+  assert.equal(notes.filter(note=>/已提交一次/.test(note)).length,1);
+  assert.match(notes.at(-1),/确认入库/);
+  assert.equal(h.submitClicks,1);
+});
+test('stopping while a progress update is pending prevents the next order action', async t => {
+  let h;h=harness(t,{progress:async note=>{if(/正在提交/.test(note))h.cancelled=true;}});
+  assert.equal((await h.run()).status,'failed');
+  assert.equal(h.getClicks,1);assert.equal(h.submitAttempts,0);
 });
