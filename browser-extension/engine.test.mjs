@@ -144,7 +144,7 @@ function harness(t, options = {}) {
       },
     },
   };
-  h.run = () => claimGame(TAB_ID, GAME, () => h.cancelled, options.progress);
+  h.run = () => claimGame(TAB_ID, GAME, () => h.cancelled, options.progress, options.resumeStage ?? null);
   return h;
 }
 
@@ -860,3 +860,78 @@ test('stopping while a progress update is pending prevents the next order action
   assert.equal((await h.run()).status,'failed');
   assert.equal(h.getClicks,1);assert.equal(h.submitAttempts,0);
 });
+
+test('continuing a submitted order confirms ownership without another Get or Submit', async t => {
+  const h = harness(t, { resumeStage: 'submitted', initial: owned() });
+  assert.equal((await h.run()).status, 'claimed');
+  assert.equal(h.getAttempts + h.submitAttempts, 0);
+  assert.equal(h.navigations.length, 1, 'only fresh ownership verification may navigate');
+  assert.equal(h.injections[0].navigation, 0, 'resume must inspect the retained page first');
+});
+
+test('continuing an unconfirmed submitted order never clicks its still-enabled order button', async t => {
+  const h = harness(t, { resumeStage: 'submitted' });
+  assert.equal((await h.run()).status, 'needs_attention');
+  assert.equal(h.getAttempts + h.submitAttempts, 0);
+  assert.equal(h.navigations.length, 0);
+});
+
+test('continuing a checkout that was never submitted uses the retained order once', async t => {
+  const h = harness(t, { resumeStage: 'checkout' });
+  assert.equal((await h.run()).status, 'claimed');
+  assert.equal(h.getAttempts, 0);
+  assert.equal(h.submitAttempts, 1);
+  assert.equal(h.navigations.length, 1);
+});
+
+test('continuing a retained checkout rechecks that the offer has not become paid', async t => {
+  const h = harness(t, { resumeStage: 'checkout', apiPrices: [1] });
+  assert.equal((await h.run()).status, 'needs_attention');
+  assert.equal(h.getAttempts + h.submitAttempts, 0);
+  assert.equal(h.navigations.length, 0);
+});
+
+test('continuing before Get still performs the full price and ownership guards', async t => {
+  const h = harness(t, { resumeStage: 'product', initial: product({ freeTexts: ['$1.00'] }) });
+  assert.equal((await h.run()).status, 'needs_attention');
+  assert.equal(h.getAttempts + h.submitAttempts, 0);
+});
+
+for (const resumeStage of ['checkout', 'submitted']) {
+  test(`continuing ${resumeStage} refuses a retained tab navigated to a different product`, async t => {
+    const h = harness(t, { resumeStage, frame: (state, frameId, fallback) => ({
+      ...fallback(frameId), url: 'https://store.epicgames.com/p/another-product',
+    }) });
+    assert.equal((await h.run()).status, 'needs_attention');
+    assert.equal(h.getAttempts + h.submitAttempts, 0);
+    assert.equal(h.navigations.length, 0);
+  });
+}
+
+test('unknown resume checkpoints cannot navigate or mutate', async t => {
+  const h = harness(t, { resumeStage: 'unknown' });
+  assert.equal((await h.run()).status, 'needs_attention');
+  assert.equal(h.injections.length, 0);
+  assert.equal(h.navigations.length, 0);
+});
+
+test('mutation checkpoints are acknowledged before the matching browser click', async t => {
+  let h;const stages = [];
+  h = harness(t, { progress: async (note, stage) => {
+    if (!stage) return;
+    stages.push(stage);
+    if (stage === 'checkout') assert.equal(h.getAttempts, 0);
+    if (stage === 'submitted') assert.equal(h.submitAttempts, 0);
+  } });
+  assert.equal((await h.run()).status, 'claimed');
+  assert.deepEqual(stages, ['checkout', 'submitted']);
+});
+
+for (const rejectedStage of ['checkout', 'submitted']) {
+  test(`a rejected ${rejectedStage} checkpoint prevents the corresponding click`, async t => {
+    const h = harness(t, { progress: async (note, stage) => stage === rejectedStage ? false : true });
+    assert.equal((await h.run()).status, 'failed');
+    assert.equal(h.getAttempts, rejectedStage === 'checkout' ? 0 : 1);
+    assert.equal(h.submitAttempts, 0);
+  });
+}

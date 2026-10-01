@@ -151,11 +151,12 @@ function cancelled(run) {
   return run.cancelled || activeRun !== run || Date.now() >= run.deadline;
 }
 
-async function saveProgress(run, note) {
+async function saveProgress(run, note, game, stage) {
   return exclusive(async () => {
     if (cancelled(run)) return false;
     const data = await readState();
     if (data.job?.runId !== run.runId) return false;
+    if (game && ['product', 'checkout', 'submitted'].includes(stage)) game.resumeStage = stage;
     await saveState({
       job: { ...data.job, tabId: run.tabId, games: run.games },
       status: { ...data.status, note, games: run.games, updatedAt: new Date().toISOString() },
@@ -205,33 +206,39 @@ async function fetchGames(run) {
 
 async function executeRun(run) {
   try {
-    run.games = await fetchGames(run);
-    if (cancelled(run)) return;
-    if (!run.games.length) {
-      await finishRun(run, 'no_free_games', '没有找到符合规则的 PC 周免游戏；本次没有领取，定时已关闭。');
-      return;
-    }
-    if (!await saveProgress(run, `找到 ${run.games.length} 款 PC 周免，准备逐一检查。`)) return;
-    const created = await exclusive(async () => {
-      if (cancelled(run)) return false;
-      const data = await readState();
-      if (data.job?.runId !== run.runId) return false;
-      const tab = await chrome.tabs.create({ url: 'about:blank', active: false });
-      run.tabId = tab.id;
-      try {
-        // Persist the returned ID immediately, before navigating or claiming.
-        await saveState({ job: { ...data.job, tabId: tab.id, games: run.games } });
-      } catch (error) {
-        await closeRecordedTab({ sessionId, tabId: tab.id });
-        throw error;
+    if (!run.resuming) {
+      run.games = await fetchGames(run);
+      if (cancelled(run)) return;
+      if (!run.games.length) {
+        await finishRun(run, 'no_free_games', '没有找到符合规则的 PC 周免游戏；本次没有领取，定时已关闭。');
+        return;
       }
-      return true;
-    });
-    if (!created) return;
+      if (!await saveProgress(run, `找到 ${run.games.length} 款 PC 周免，准备逐一检查。`)) return;
+      const created = await exclusive(async () => {
+        if (cancelled(run)) return false;
+        const data = await readState();
+        if (data.job?.runId !== run.runId) return false;
+        const tab = await chrome.tabs.create({ url: 'about:blank', active: false });
+        run.tabId = tab.id;
+        try {
+          // Persist the returned ID immediately, before navigating or claiming.
+          await saveState({ job: { ...data.job, tabId: tab.id, games: run.games } });
+        } catch (error) {
+          await closeRecordedTab({ sessionId, tabId: tab.id });
+          throw error;
+        }
+        return true;
+      });
+      if (!created) return;
+    }
     for (const game of run.games) {
-      if (!await saveProgress(run, `正在检查：${game.title}`)) return;
+      if (['claimed', 'already_owned'].includes(game.status)) continue;
+      const resumeStage = run.resumeGame === game ? game.resumeStage : null;
+      game.status = 'pending';
+      delete game.reason;
+      if (!await saveProgress(run, `正在检查：${game.title}`, game, resumeStage || 'product')) return;
       const result = await claimGame(run.tabId, game, () => cancelled(run),
-        note => saveProgress(run, `${game.title}：${note}`));
+        (note, stage) => saveProgress(run, `${game.title}：${note}`, game, stage), resumeStage);
       if (cancelled(run)) return;
       if (!['claimed', 'already_owned', 'needs_login', 'needs_attention', 'failed'].includes(result?.status)) throw new Error('invalid_engine_result');
       game.status = result.status;
@@ -240,13 +247,14 @@ async function executeRun(run) {
       if (!['claimed', 'already_owned'].includes(game.status)) {
         const manual = ['needs_login', 'needs_attention'].includes(game.status);
         const note = game.status === 'needs_login'
-          ? '需要登录，已保留领取页并关闭定时。完成登录后，关闭该页并重新手动试领。'
+          ? '需要登录，已保留领取页并关闭定时。完成登录后点击“继续任务”。'
           : manual
-            ? '需要人工检查或安全验证，已保留领取页并关闭定时。处理后关闭该页，再手动试领。'
+            ? '需要人工检查或安全验证，已保留领取页并关闭定时。处理后点击“继续任务”。'
             : '本轮领取失败，已关闭领取页和定时。请查看下方结果后再手动试领。';
         await finishRun(run, game.status, note, manual);
         return;
       }
+      delete game.resumeStage;
       if (!await saveProgress(run, game.status === 'already_owned'
         ? `已拥有，已跳过：${game.title}` : `已确认入库：${game.title}`)) return;
     }
@@ -261,22 +269,32 @@ async function executeRun(run) {
   }
 }
 
-async function startRun(source) {
+async function startRun(source, resuming = false) {
   const data = await readState();
   if (activeRun || data.status.running) return response(false, '本轮仍在运行，请等待或先点“停止”。');
-  if (data.job) {
+  let resumeGame = null;
+  if (resuming) {
+    const games = data.job?.games;
+    if (data.job?.phase !== 'manual' || !await recordedTabExists(data.job)) return response(false, '没有可继续的领取页，请停止旧任务后重新运行。');
+    if (!Array.isArray(games) || !games.length || games.length > MAX_GAMES ||
+        games.some(game => !game || typeof game.url !== 'string' || canonicalProductUrl(game.url) !== game.url)) return response(false, '任务记录不完整，请停止后重新运行。');
+    resumeGame = games.find(game => !['claimed', 'already_owned'].includes(game.status));
+    if (!resumeGame || !['product', 'checkout', 'submitted'].includes(resumeGame.resumeStage)) return response(false, '此任务没有可继续的阶段记录，请停止后重新运行。');
+  } else if (data.job) {
     if (data.job.phase === 'manual' && !await recordedTabExists(data.job)) {
       await saveState({ job: null, status: { ...data.status, tabId: null } });
-    } else return response(false, '仍有待处理的领取页或中断记录。请关闭领取页，或点“停止”后再试。');
+    } else return response(false, '仍有待处理的领取页或中断记录。请点“继续任务”，或点“停止”后重新运行。');
   }
   if (source === 'scheduled' && !data.settings.enabled) return response();
   const now = Date.now();
-  const run = { runId: crypto.randomUUID(), startedAt: now, deadline: now + RUN_LIMIT_MS, tabId: null, games: [], cancelled: false, timer: null, abort: null };
+  const run = { runId: crypto.randomUUID(), startedAt: now, deadline: now + RUN_LIMIT_MS,
+    tabId: resuming ? data.job.tabId : null, games: resuming ? data.job.games : [],
+    resuming, resumeGame, cancelled: false, timer: null, abort: null };
   activeRun = run;
   try {
     await saveState({
-      job: { runId: run.runId, sessionId, phase: 'running', source, startedAt: now, deadline: run.deadline, tabId: null, games: [] },
-      status: { ...data.status, state: 'running', note: '正在读取 Epic 官方周免列表。', games: [], running: true, updatedAt: new Date().toISOString(), tabId: null },
+      job: { runId: run.runId, sessionId, phase: 'running', source, startedAt: now, deadline: run.deadline, tabId: run.tabId, games: run.games },
+      status: { ...data.status, state: 'running', note: resuming ? '正在继续保留的领取任务。' : '正在读取 Epic 官方周免列表。', games: run.games, running: true, updatedAt: new Date().toISOString(), tabId: run.tabId },
     });
     await chrome.alarms.create(`${DEADLINE_PREFIX}${run.runId}`, { when: run.deadline });
     run.timer = setTimeout(() => {
@@ -291,6 +309,12 @@ async function startRun(source) {
     clearTimeout(run.timer);
     await chrome.alarms.clear(`${DEADLINE_PREFIX}${run.runId}`);
     data.settings.enabled = false;
+    if (resuming) {
+      const status = await syncSchedule(data.settings, { ...data.status, state: 'needs_attention', note: '任务未能继续，已保留领取页和进度，请再次点击“继续任务”。', running: false, updatedAt: new Date().toISOString() });
+      await saveState({ settings: data.settings, status, job: { ...data.job, phase: 'manual' } });
+      activeRun = null;
+      throw error;
+    }
     const status = await syncSchedule(data.settings, { ...data.status, state: 'failed', note: '任务未能启动，已停止并关闭定时。', running: false, tabId: null, updatedAt: new Date().toISOString() });
     await saveState({ settings: data.settings, status, job: null });
     activeRun = null;
@@ -321,10 +345,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Only our popup/extension pages can start orders, not injected page scripts.
   if (sender.id !== chrome.runtime.id ||
       (sender.tab && !sender.url?.startsWith(`chrome-extension://${chrome.runtime.id}/`))) return false;
-  if (!['getStatus', 'runNow', 'setEnabled', 'stop'].includes(message?.type)) return false;
+  if (!['getStatus', 'runNow', 'resume', 'setEnabled', 'stop'].includes(message?.type)) return false;
   void ready.then(() => exclusive(async () => {
     if (message.type === 'getStatus') return response();
     if (message.type === 'runNow') return startRun('manual');
+    if (message.type === 'resume') return startRun('resume', true);
     if (message.type === 'stop') return stopRun();
     if (typeof message.enabled !== 'boolean') return response(false, '启用状态无效。');
     const data = await readState();

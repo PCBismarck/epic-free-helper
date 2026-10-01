@@ -7,8 +7,9 @@ const source = (await fs.readFile(new URL('../browser-extension/background.js', 
 const game = {title:'Test game',url:'https://store.epicgames.com/p/test-game',id:'test',namespace:'test',start:'2026-09-10T00:00:00Z',end:'2026-09-17T00:00:00Z'};
 const clone = value => structuredClone(value);
 const tick = () => new Promise(resolve => setImmediate(resolve));
-async function make({data={},session='browser-a',engine=async()=>({status:'claimed'}),games=[game],fetcher,actionFailure}={}) {
+async function make({data={},session='browser-a',engine=async()=>({status:'claimed'}),games=[game],fetcher,actionFailure,existingTabs=[]}={}) {
  const local=clone(data), tabs=new Map(), alarms=new Map(), removed=[], created=[], timers=new Map(); let nextTab=100,nextTimer=0;
+ for(const tab of existingTabs)tabs.set(tab.id,clone(tab));
  const callbacks={};
  const toolbar={text:null,color:null,textColor:null,title:null}, toolbarHistory=[];
  const action=Object.fromEntries([
@@ -145,4 +146,80 @@ await test('engine progress is persisted for the popup and toolbar before a manu
  finish({status:'needs_attention',reason:'checkout not ready'});await m.settle();
  assert.equal(m.local.status.state,'needs_attention');assert.equal(m.toolbar.text,'!');
 });
+await test('Continue reuses the retained tab, skips completed games and resumes exactly one saved stage',async()=>{
+ const games=[game,{...game,title:'Second',url:'https://store.epicgames.com/p/second'},
+  {...game,title:'Third',url:'https://store.epicgames.com/p/third'}];
+ const calls=[];let fetches=0;
+ const m=await make({games,fetcher:async()=>{fetches++;return {ok:true,json:async()=>({})};},
+  engine:async(tab,current,cancelled,progress,stage)=>{
+   calls.push({tab,title:current.title,stage});
+   if(current.title===game.title)return {status:'already_owned'};
+   if(current.title==='Second'&&stage===null){
+    await progress('Submitting','submitted');return {status:'needs_attention',reason:'verification'};
+   }
+   return {status:'claimed'};
+  }});
+ await m.message('runNow');await m.settle();
+ assert.equal(m.local.job.games[1].resumeStage,'submitted');
+ assert.equal(m.local.job.games[0].resumeStage,undefined);
+ const oldAlarm=`epic-deadline-${m.local.job.runId}`;
+ assert.equal((await m.message('resume')).ok,true);await m.settle();
+ assert.deepEqual(calls.map(call=>[call.title,call.stage]),[[game.title,null],['Second',null],['Second','submitted'],['Third',null]]);
+ assert.ok(calls.every(call=>call.tab===100));assert.equal(fetches,1);
+ assert.equal(m.created.length,1);assert.deepEqual(m.removed,[100]);
+ assert.equal(m.local.status.state,'claimed');assert.equal(m.toolbar.text,'✓');assert.equal(m.local.job,null);
+ m.callbacks.alarm({name:oldAlarm});await m.settle();assert.equal(m.local.status.state,'claimed');
+});
+
+await test('duplicate Continue requests start only one engine and Stop cancels a late resumed result',async()=>{
+ let finish;let calls=0;
+ const m=await make({engine:async(tab,current,cancelled,progress,stage)=>{
+  calls++;if(stage===null){await progress('Submitted','submitted');return {status:'needs_attention'};}
+  return new Promise(resolve=>{finish=resolve;});
+ }});
+ await m.message('runNow');await m.settle();
+ const answers=await Promise.all([m.message('resume'),m.message('resume')]);await m.settle();
+ assert.equal(answers.filter(answer=>answer.ok).length,1);assert.equal(calls,2);
+ assert.equal(m.created.length,1);assert.equal(m.toolbar.text,'…');
+ await m.message('stop');finish({status:'claimed'});await m.settle();
+ assert.equal(m.local.status.state,'stopped');assert.equal(m.local.job,null);assert.deepEqual(m.removed,[100]);
+});
+
+await test('Continue rejects closed, detached and legacy task records without opening another tab',async()=>{
+ for(const change of ['closed','detached','legacy','invalid_url']){
+  const m=await make({engine:async(tab,current,cancelled,progress)=>{await progress('Submitted','submitted');return {status:'needs_attention'};}});
+  await m.message('runNow');await m.settle();
+  if(change==='closed')m.tabs.delete(100);
+  if(change==='detached'){m.local.job.phase='detached';m.local.job.sessionId='other-session';}
+  if(change==='legacy')delete m.local.job.games[0].resumeStage;
+  if(change==='invalid_url')m.local.job.games[0].url=null;
+  assert.equal((await m.message('resume')).ok,false);assert.equal(m.created.length,1);assert.deepEqual(m.removed,[]);
+ }
+});
+
+await test('a paused job survives same-session worker sleep and continues only on an explicit request',async()=>{
+ const first=await make({engine:async(tab,current,cancelled,progress)=>{await progress('Submitted','submitted');return {status:'needs_attention'};}});
+ await first.message('runNow');await first.settle();let calls=0;
+ const restarted=await make({data:first.local,existingTabs:[{id:100,url:game.url}],engine:async(tab,current,cancelled,progress,stage)=>{
+  calls++;assert.equal(tab,100);assert.equal(stage,'submitted');return {status:'claimed'};
+ }});
+ assert.equal(calls,0);assert.equal(restarted.local.job.phase,'manual');assert.equal(restarted.toolbar.text,'!');
+ assert.equal((await restarted.message('resume')).ok,true);await restarted.settle();
+ assert.equal(calls,1);assert.equal(restarted.created.length,0);assert.equal(restarted.local.status.state,'claimed');
+});
+
+await test('a deadline pause retains the submitted checkpoint for Continue',async()=>{
+ let finish;
+ const m=await make({engine:async(tab,current,cancelled,progress,stage)=>{
+  if(stage==='submitted')return {status:'claimed'};
+  await progress('Submitted','submitted');return new Promise(resolve=>{finish=resolve;});
+ }});
+ await m.message('runNow');await m.settle();
+ m.callbacks.alarm([...m.alarms.values()].find(alarm=>alarm.name.startsWith('epic-deadline-')));await m.settle();
+ assert.equal(m.local.job.games[0].resumeStage,'submitted');
+ await m.message('resume');await m.settle();
+ finish({status:'failed'});await m.settle();
+ assert.equal(m.local.status.state,'claimed');assert.equal(m.local.job,null);assert.equal(m.created.length,1);
+});
+
 console.log(`Passed ${count} mocked lifecycle checks; no browser was launched.`);

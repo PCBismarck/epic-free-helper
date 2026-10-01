@@ -2,7 +2,7 @@
 
 const elements = Object.fromEntries([
   'status-text', 'status-note', 'status-dot', 'updated-at', 'run-button',
-  'stop-button', 'enabled-toggle', 'notice', 'empty-games', 'game-list',
+  'resume-button', 'stop-button', 'enabled-toggle', 'notice', 'empty-games', 'game-list',
 ].map(id => [id, document.getElementById(id)]));
 
 const states = {
@@ -105,6 +105,10 @@ function renderGames(status) {
 function render() {
   const status = snapshot.status || {};
   const running = Boolean(status.running) || status.state === 'running';
+  const pendingGame = Array.isArray(snapshot.job?.games)
+    ? snapshot.job.games.find(game => game && !['claimed', 'already_owned'].includes(game.status)) : null;
+  const resumable = snapshot.job?.phase === 'manual' &&
+    ['product', 'checkout', 'submitted'].includes(pendingGame?.resumeStage);
   const [label, tone] = Object.hasOwn(states, status.state)
     ? states[status.state] : [loaded ? '尚未确认当前领取状态' : '正在读取最近状态…', 'neutral'];
   elements['status-text'].textContent = label;
@@ -114,7 +118,10 @@ function render() {
   elements['updated-at'].textContent = displayTime(status.updatedAt);
   elements['enabled-toggle'].checked = snapshot.settings?.enabled === true;
   elements['enabled-toggle'].disabled = busy || !loaded;
-  elements['run-button'].disabled = busy || !loaded || running;
+  elements['run-button'].hidden = resumable;
+  elements['run-button'].disabled = busy || !loaded || running || Boolean(snapshot.job);
+  elements['resume-button'].hidden = !resumable;
+  elements['resume-button'].disabled = busy || !loaded || running || !resumable;
   elements['stop-button'].disabled = busy || !loaded
     || (!snapshot.job && !running && !Number.isInteger(status.tabId));
   renderGames(status);
@@ -147,6 +154,7 @@ async function request(type, extra = {}) {
 }
 
 elements['run-button'].addEventListener('click', () => request('runNow'));
+elements['resume-button'].addEventListener('click', () => request('resume'));
 elements['stop-button'].addEventListener('click', () => request('stop'));
 elements['enabled-toggle'].addEventListener('change', event => request('setEnabled', { enabled: event.target.checked }));
 
