@@ -71,6 +71,25 @@ test('captured Chinese free-checkout DOM proves the single offer without inventi
   assert.equal(page.clicks(), 1);
 });
 
+test('a challenge inserted after submission is detected even with the submit button disabled', t => {
+  const page = fixture(t);
+  assert.deepEqual(page.submit(), { clicked: true });
+  page.document.querySelector('button').disabled = true;
+  const challenge = page.document.createElement('iframe');
+  challenge.src = 'https://newassets.hcaptcha.com/captcha/v1/challenge.html';
+  page.document.body.append(challenge);
+  assert.equal(page.inspect().challenge, true);
+  assert.notEqual(page.submit().clicked, true);
+  assert.equal(page.clicks(), 1);
+});
+
+test('a hidden captcha iframe alone does not pause the checkout', t => {
+  const page = fixture(t, { extra: '<iframe hidden src="https://newassets.hcaptcha.com/captcha/v1/challenge.html"></iframe>' });
+  assert.notEqual(page.inspect().challenge, true);
+  assert.equal(isVerifiedZeroCheckout(page.inspect().order, GAME), true);
+  assert.equal(page.clicks(), 0);
+});
+
 for (const [name, options] of [
   ['nonzero item price', { amount: '¥0.01' }],
   ['missing item price', { card: '<div id="item-card"><span>Luftrausers</span></div>' }],

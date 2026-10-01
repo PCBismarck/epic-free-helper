@@ -438,10 +438,87 @@ test('the engine independently rejects a free-checkout URL for a different offer
 
 test('an unconfirmed checkout times out without a second order submission', async t => {
   const h = harness(t, { afterSubmit: () => product(), verify: () => product() });
-  assert.equal((await h.run()).status, 'needs_attention');
+  const result = await h.run();
+  assert.equal(result.status, 'needs_attention');
+  assert.match(result.reason, /提交一次订单后等待 60 秒.*保留原页面/);
   assert.equal(h.getClicks, 1);
   assert.equal(h.submitClicks, 1);
-  assert.ok(h.now - NOW >= 45000);
+  assert.equal(h.navigations.length, 1, 'timeout must preserve the original checkout');
+  const submittedAt = h.injections.find(call => call.action === 'submit').at;
+  assert.ok(h.now - submittedAt >= 60000 && h.now - submittedAt < 61000);
+});
+
+for (const rootOwned of [false, true]) {
+  test(`a post-submit child challenge preserves checkout even when root owned=${rootOwned}`, async t => {
+    const h = harness(t, {
+      afterSubmit: () => rootOwned ? owned() : product(),
+      inspect: (state, frameId, fallback) => frameId === 1 && state.submitClicks
+        ? { challenge: true } : fallback(frameId),
+    });
+    const result = await h.run();
+    assert.equal(result.status, 'needs_attention');
+    assert.match(result.reason, /提交订单后出现安全验证/);
+    assert.equal(h.getAttempts, 1);
+    assert.equal(h.submitAttempts, 1);
+    assert.equal(h.navigations.length, 1);
+    assert.equal(h.verificationReads, 0);
+    assert.ok(h.now - h.injections.find(call => call.action === 'submit').at >= 60000);
+  });
+}
+
+test('a transient post-submit challenge can disappear and complete without another click', async t => {
+  const notes = [];
+  const h = harness(t, {
+    progress: async note => notes.push(note),
+    inspect: (state, frameId, fallback) => frameId === 1 && state.submitClicks && state.afterSubmitReads < 5
+      ? { challenge: true } : fallback(frameId),
+  });
+  assert.equal((await h.run()).status, 'claimed');
+  assert.equal(h.getAttempts, 1);
+  assert.equal(h.submitAttempts, 1);
+  assert.equal(h.navigations.length, 2);
+  assert.equal(notes.filter(note => /等待安全验证结果/.test(note)).length, 1);
+  assert.equal(notes.filter(note => /验证窗口已关闭/.test(note)).length, 1);
+});
+
+test('a vanished challenge without confirmed ownership preserves checkout as unconfirmed', async t => {
+  const h = harness(t, {
+    afterSubmit: () => product(),
+    inspect: (state, frameId, fallback) => frameId === 1 && state.submitClicks && state.afterSubmitReads < 5
+      ? { challenge: true } : fallback(frameId),
+  });
+  const result = await h.run();
+  assert.equal(result.status, 'needs_attention');
+  assert.match(result.reason, /仍未确认入库/);
+  assert.equal(h.submitAttempts, 1);
+  assert.equal(h.navigations.length, 1);
+});
+
+test('a post-submit login redirect in the checkout preserves the page without resubmission', async t => {
+  const h = harness(t, {
+    afterSubmit: () => product(),
+    inspect: (state, frameId, fallback) => frameId === 1 && state.submitClicks
+      ? { needsLogin: true } : fallback(frameId),
+  });
+  assert.equal((await h.run()).status, 'needs_login');
+  assert.equal(h.submitAttempts, 1);
+  assert.equal(h.navigations.length, 1);
+});
+
+test('50-second checkout loading leaves a full post-submit window for a slow successful order', async t => {
+  const h = harness(t, {
+    inspect: (state, frameId, fallback) => frameId === 1 && state.now - NOW < 53000
+      ? {} : fallback(frameId),
+    afterSubmit: state => {
+      const submittedAt = state.injections.find(call => call.action === 'submit').at;
+      return state.now - submittedAt >= 30000 ? owned() : product();
+    },
+  });
+  assert.equal((await h.run()).status, 'claimed');
+  assert.ok(h.now - NOW > 83000);
+  assert.equal(h.getAttempts, 1);
+  assert.equal(h.submitAttempts, 1);
+  assert.equal(h.navigations.length, 2, 'only positive ownership starts a fresh verification');
 });
 
 test('a refused initial click is never retried and cannot lead to Submit', async t => {

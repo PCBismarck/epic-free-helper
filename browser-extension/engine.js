@@ -305,8 +305,9 @@ export async function claimGame(tabId, game, isCancelled = () => false, onProgre
     if (!clicked.clicked) return attention('领取按钮或免费价格发生变化，已停止');
 
     await progress('已点击获取，正在等待结账页；尚未提交订单');
-    const deadline = Date.now() + 60000;
+    let deadline = Date.now() + 60000;
     let submitted = false;
+    let awaitingChallenge = false;
     while (Date.now() < deadline) {
       check();
       try { state = await read(); } catch (error) {
@@ -317,20 +318,46 @@ export async function claimGame(tabId, game, isCancelled = () => false, onProgre
       if (state.needsLogin) throw new Error('needs_login');
       if (state.challenge) return attention('需要完成安全验证，自动领取已暂停');
       if (canonicalProductUrl(state.url) !== game.url) return attention('结账发生未识别跳转，请在标签页查看');
+      // Keep inspecting checkout frames after the one allowed submission.
+      // A challenge can appear there only after clicking Add to Library and
+      // must be checked before any ownership reload erases the checkout.
+      const checkouts = [];
+      let checkoutChallenge = false;
+      const frames = await chrome.webNavigation.getAllFrames({ tabId });
+      for (const frame of frames || []) {
+        check();
+        let url;
+        try { url = new URL(frame.url); } catch { continue; }
+        if (url.protocol !== 'https:' || !(url.hostname === 'epicgames.com' || url.hostname.endsWith('.epicgames.com'))) continue;
+        let checkout;
+        try { checkout = frame.frameId === 0 ? state : await read(frame.frameId); } catch (error) {
+          if (!isNavigationReadError(error)) throw error;
+          continue;
+        }
+        if (checkout.challenge) {
+          if (!submitted) return attention('结账要求安全验证，自动领取已暂停');
+          checkoutChallenge = true;
+          break;
+        }
+        if (checkout.needsLogin) throw new Error('needs_login');
+        checkouts.push({ frame, checkout });
+      }
+      if (checkoutChallenge) {
+        // hCaptcha can briefly show its frame while performing an automatic
+        // check. Wait within the existing post-submit deadline, without any
+        // further clicks, so a transient frame does not abort a valid order.
+        if (!awaitingChallenge) await progress('提交后正在等待安全验证结果；如页面要求，请手动完成验证，不要重复提交');
+        awaitingChallenge = true;
+        await delay(900);
+        continue;
+      }
+      if (awaitingChallenge) await progress('安全验证窗口已关闭，继续等待入库；不会重复提交');
+      awaitingChallenge = false;
       if (isOwnedCta(state.cta)) return await verify() ? { status: 'claimed' } : attention('领取后尚未确认入库');
       if (!submitted) {
-        const frames = await chrome.webNavigation.getAllFrames({ tabId });
-        for (const frame of frames || []) {
-          check();
-          let url;
-          try { url = new URL(frame.url); } catch { continue; }
-          if (url.protocol !== 'https:' || !(url.hostname === 'epicgames.com' || url.hostname.endsWith('.epicgames.com'))) continue;
-          let checkout;
-          try { checkout = frame.frameId === 0 ? state : await read(frame.frameId); } catch (error) {
-            if (!isNavigationReadError(error)) throw error;
-            continue;
-          }
-          if (checkout.challenge) return attention('结账要求安全验证，自动领取已暂停');
+        for (const entry of checkouts) {
+          const { frame } = entry;
+          let { checkout } = entry;
           if (!checkout.order) continue;
           let orderGame = game;
           if (checkout.order.kind === 'free_checkout' && checkout.order.matchesTitle === false &&
@@ -352,16 +379,17 @@ export async function claimGame(tabId, game, isCancelled = () => false, onProgre
           await progress('订单已通过零元检查，正在提交');
           if (!(await read(frame.frameId, 'submit', checkout.documentId, orderGame)).clicked) return attention('提交前订单状态变化，已停止');
           submitted = true;
-          await progress('已提交一次订单，正在等待入库；不会重复提交');
+          // Slow checkout loading must not consume the post-submit window.
+          deadline = Date.now() + 60000;
+          await progress('已提交一次订单，最多等待 60 秒确认入库；不会重复提交');
           break;
         }
       }
       await delay(900);
     }
     if (!submitted) return attention('点击获取后 60 秒内未找到可核验的结账页，未提交订单；已保留原页面，请检查是否有验证、弹窗或加载错误');
-    // Only a submitted order needs a final ownership reload. Preserve the
-    // original page when checkout never became usable, including any challenge.
-    return await verify() ? { status: 'claimed' } : attention('尚未确认入库，请在保留的标签页查看');
+    if (awaitingChallenge) return attention('提交订单后出现安全验证，等待 60 秒仍未完成，已暂停并保留原页面；请手动完成验证后重新运行');
+    return attention('提交一次订单后等待 60 秒仍未确认入库，已保留原页面且不会重复提交；请检查验证、加载或订单错误');
   } catch (error) {
     if (error.message === 'needs_login') return { status: 'needs_login', reason: '请在 Windows 浏览器登录 Epic 后重新运行' };
     if (error.message === 'page_timeout') return attention(error.reason || '页面状态未稳定，请在保留的标签页查看');

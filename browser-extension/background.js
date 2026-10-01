@@ -280,7 +280,7 @@ async function startRun(source) {
     });
     await chrome.alarms.create(`${DEADLINE_PREFIX}${run.runId}`, { when: run.deadline });
     run.timer = setTimeout(() => {
-      void finishRun(run, 'failed', '本轮已达到 5 分钟上限，已停止并关闭领取页和定时。').catch(() => {});
+      void finishRun(run, 'needs_attention', '本轮已达到 5 分钟上限，已停止并关闭定时；已保留领取页供检查。', true).catch(() => {});
     }, RUN_LIMIT_MS);
     // The popup receives the start acknowledgement immediately. Progress and
     // results arrive through chrome.storage.onChanged, including after it closes.
@@ -356,7 +356,7 @@ chrome.alarms.onAlarm.addListener(alarm => {
     } else if (alarm.name.startsWith(DEADLINE_PREFIX)) {
       const run = activeRun;
       if (run && alarm.name === `${DEADLINE_PREFIX}${run.runId}`) {
-        await finishRun(run, 'failed', '本轮已达到 5 分钟上限，已停止并关闭领取页和定时。');
+        await finishRun(run, 'needs_attention', '本轮已达到 5 分钟上限，已停止并关闭定时；已保留领取页供检查。', true);
       }
     }
   }).catch(() => {});
