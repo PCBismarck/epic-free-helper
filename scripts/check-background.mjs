@@ -7,11 +7,12 @@ const source = (await fs.readFile(new URL('../browser-extension/background.js', 
 const game = {title:'Test game',url:'https://store.epicgames.com/p/test-game',id:'test',namespace:'test',start:'2026-09-10T00:00:00Z',end:'2026-09-17T00:00:00Z'};
 const clone = value => structuredClone(value);
 const tick = () => new Promise(resolve => setImmediate(resolve));
-async function make({data={},session='browser-a',engine=async()=>({status:'claimed'}),games=[game],fetcher,actionFailure,existingTabs=[]}={}) {
+async function make({data={},session='browser-a',sessionData,toolbarState,engine=async()=>({status:'claimed'}),games=[game],fetcher,actionFailure,existingTabs=[]}={}) {
  const local=clone(data), tabs=new Map(), alarms=new Map(), removed=[], created=[], timers=new Map(); let nextTab=100,nextTimer=0;
  for(const tab of existingTabs)tabs.set(tab.id,clone(tab));
  const callbacks={};
- const toolbar={text:null,color:null,textColor:null,title:null}, toolbarHistory=[];
+ const toolbar={text:null,color:null,textColor:null,title:null,...toolbarState}, toolbarHistory=[];
+ const localWrites=[], sessionStore=clone(sessionData ?? (session?{epicSessionId:session}:{}));
  const action=Object.fromEntries([
   ['setBadgeText','text','text'], ['setBadgeBackgroundColor','color','color'],
   ['setBadgeTextColor','textColor','color'], ['setTitle','title','title'],
@@ -21,13 +22,13 @@ async function make({data={},session='browser-a',engine=async()=>({status:'claim
   toolbar[key]=details[field];toolbarHistory.push({...toolbar});
  }]));
  const evt=name=>({addListener(fn){callbacks[name]=fn;}});
- const storage=(data)=>({async get(keys){return Object.fromEntries((typeof keys==='string'?[keys]:keys).filter(k=>k in data).map(k=>[k,clone(data[k])]));}, async set(changes){Object.assign(data,clone(changes));}});
- const chrome={action,runtime:{id:'extension',onMessage:evt('message'),onStartup:evt('startup'),onInstalled:evt('install')},storage:{local:storage(local),session:storage(session?{epicSessionId:session}:{})},alarms:{async create(name,opts){alarms.set(name,{name,scheduledTime:opts.when});},async get(name){return alarms.get(name);},async clear(name){return alarms.delete(name);},onAlarm:evt('alarm')},tabs:{async create(opts){const tab={id:nextTab++,...opts};tabs.set(tab.id,tab);created.push(tab);return tab;},async get(id){if(!tabs.has(id))throw Error('missing tab');return tabs.get(id);},async remove(id){removed.push(id);tabs.delete(id);callbacks.removed?.(id);},onRemoved:evt('removed')}};
+ const storage=(data,writes=[])=>({async get(keys){return Object.fromEntries((typeof keys==='string'?[keys]:keys).filter(k=>k in data).map(k=>[k,clone(data[k])]));}, async set(changes){writes.push(clone(changes));Object.assign(data,clone(changes));}});
+ const chrome={action,runtime:{id:'extension',onMessage:evt('message'),onStartup:evt('startup'),onInstalled:evt('install')},storage:{local:storage(local,localWrites),session:storage(sessionStore)},alarms:{async create(name,opts){alarms.set(name,{name,scheduledTime:opts.when});},async get(name){return alarms.get(name);},async clear(name){return alarms.delete(name);},onAlarm:evt('alarm')},tabs:{async create(opts){const tab={id:nextTab++,...opts};tabs.set(tab.id,tab);created.push(tab);return tab;},async get(id){if(!tabs.has(id))throw Error('missing tab');return tabs.get(id);},async remove(id){removed.push(id);tabs.delete(id);callbacks.removed?.(id);},onRemoved:evt('removed')}};
  const context={...rules,selectWeeklyPcGames:()=>clone(games),chrome,crypto:{randomUUID},Date,URL,AbortController,console,fetch:fetcher|| (async()=>({ok:true,json:async()=>({})})),claimGame:engine,setTimeout(fn,ms){const id=++nextTimer;timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}};
  vm.runInNewContext(source,context); await context.internals.ready;
  async function message(type,extra={}){return new Promise(resolve=>{assert.equal(callbacks.message({type,...extra},{id:'extension'},resolve),true);});}
  async function settle(){for(let i=0;i<15;i++)await tick();}
- return {local,tabs,created,removed,alarms,timers,callbacks,message,settle,context,toolbar,toolbarHistory};
+ return {local,tabs,created,removed,alarms,timers,callbacks,message,settle,context,toolbar,toolbarHistory,localWrites,sessionData:sessionStore};
 }
 let count=0;
 async function test(name,fn){await fn();console.log(`ok ${++count}: ${name}`);}
@@ -220,6 +221,38 @@ await test('a deadline pause retains the submitted checkpoint for Continue',asyn
  await m.message('resume');await m.settle();
  finish({status:'failed'});await m.settle();
  assert.equal(m.local.status.state,'claimed');assert.equal(m.local.job,null);assert.equal(m.created.length,1);
+});
+
+await test('ordinary worker wake and unrelated tab closure do not rewrite saved results or redraw the toolbar',async()=>{
+ const first=await make({data:{status:{state:'already_owned',games:[{...game,status:'already_owned'}]}}});
+ const restarted=await make({data:first.local,sessionData:first.sessionData,toolbarState:first.toolbar});
+ await restarted.message('getStatus');
+ restarted.callbacks.removed(999);await restarted.settle();
+ assert.equal(restarted.localWrites.length,0);assert.equal(restarted.toolbarHistory.length,0);
+ assert.equal(restarted.toolbar.text,'✓');assert.deepEqual(restarted.local,first.local);
+ assert.equal(restarted.created.length,0);
+});
+
+await test('a new browser session restores the badge even when no local data needs rewriting',async()=>{
+ const first=await make({data:{status:{state:'already_owned',games:[{...game,status:'already_owned'}]}}});
+ const restarted=await make({data:first.local,session:null});
+ assert.equal(restarted.localWrites.length,0);assert.equal(restarted.toolbarHistory.length,4);
+ assert.equal(restarted.toolbar.text,'✓');assert.ok(restarted.sessionData.epicToolbarKey);
+});
+
+await test('a cached green badge never suppresses a new failure indication',async()=>{
+ const first=await make({data:{status:{state:'already_owned',games:[{...game,status:'already_owned'}]}}});
+ const data=clone(first.local);data.status.state='failed';data.status.note='New failure';
+ const restarted=await make({data,sessionData:first.sessionData,toolbarState:first.toolbar});
+ assert.equal(restarted.toolbar.text,'!');assert.equal(restarted.toolbar.color,'#dc2626');
+ assert.equal(restarted.toolbarHistory.length,4);
+});
+
+await test('failed toolbar updates are not cached as successful across worker sleep',async()=>{
+ const first=await make({actionFailure:'setTitle'});
+ assert.equal(first.sessionData.epicToolbarKey,undefined);
+ const restarted=await make({data:first.local,sessionData:first.sessionData});
+ assert.equal(restarted.toolbarHistory.length,4);assert.ok(restarted.sessionData.epicToolbarKey);
 });
 
 console.log(`Passed ${count} mocked lifecycle checks; no browser was launched.`);

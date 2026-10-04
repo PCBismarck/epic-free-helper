@@ -10,6 +10,8 @@ const EMPTY_STATUS = { state: 'idle', note: '请先手动试领，确认正常�
 let sessionId;
 let activeRun = null;
 let mutationTail = Promise.resolve();
+let lastToolbarKey;
+let timeFormatter;
 
 // Short state transitions are serialized. The page engine runs outside this
 // queue so Stop can cancel it while it is waiting for a page or network request.
@@ -27,9 +29,12 @@ function normalizeSettings(settings = {}) {
   };
 }
 
-async function readState() {
-  const data = await chrome.storage.local.get(['settings', 'status', 'job']);
+function normalizeState(data) {
   return { settings: normalizeSettings(data.settings), status: { ...EMPTY_STATUS, ...data.status }, job: data.job || null };
+}
+
+async function readState() {
+  return normalizeState(await chrome.storage.local.get(['settings', 'status', 'job']));
 }
 
 async function updateToolbar({ status, settings }) {
@@ -58,20 +63,29 @@ async function updateToolbar({ status, settings }) {
     ? [problem.title, problem.reason].filter(value => typeof value === 'string').join('：')
     : status.note;
   const when = status.updatedAt ? new Date(status.updatedAt) : null;
-  const updated = when && Number.isFinite(when.getTime())
-    ? `最近更新：${new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai',
-      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(when)}` : '';
+  let updated = '';
+  if (when && Number.isFinite(when.getTime())) {
+    timeFormatter ||= new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai',
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+    updated = `最近更新：${timeFormatter.format(when)}`;
+  }
   const title = ['Epic 周免领取助手', label, typeof detail === 'string' ? detail.slice(0, 300) : '', updated,
     settings.enabled ? '每日定时已开启' : '每日定时已关闭', '点击查看每款游戏的结果'].filter(Boolean).join('\n');
-  // Global action state survives popup closure and is restored at worker start.
+  const key = JSON.stringify([text, color, title]);
+  // Chrome retains action state while this worker sleeps. The session cache
+  // disappears on browser/extension restart, when the badge must be restored.
+  if (key === lastToolbarKey) return;
   // A toolbar API failure must not interrupt saving or completing a claim.
   try {
-    await Promise.allSettled([
+    const results = await Promise.allSettled([
       chrome.action.setBadgeBackgroundColor({ color }),
       chrome.action.setBadgeTextColor({ color: '#ffffff' }),
       chrome.action.setTitle({ title }),
     ]);
     await chrome.action.setBadgeText({ text });
+    if (results.some(result => result.status === 'rejected')) return;
+    lastToolbarKey = key;
+    await chrome.storage.session.set({ epicToolbarKey: key });
   } catch { /* Claim state remains available in the popup. */ }
 }
 
@@ -117,10 +131,12 @@ async function closeRecordedTab(job) {
 }
 
 async function initialize() {
-  const session = await chrome.storage.session.get('epicSessionId');
+  const session = await chrome.storage.session.get(['epicSessionId', 'epicToolbarKey']);
   sessionId = session.epicSessionId || crypto.randomUUID();
+  lastToolbarKey = session.epicToolbarKey;
   if (!session.epicSessionId) await chrome.storage.session.set({ epicSessionId: sessionId });
-  let { settings, status, job } = await readState();
+  const stored = await chrome.storage.local.get(['settings', 'status', 'job']);
+  let { settings, status, job } = normalizeState(stored);
   if (job) {
     settings.enabled = false;
     await chrome.alarms.clear(`${DEADLINE_PREFIX}${job.runId}`);
@@ -142,7 +158,12 @@ async function initialize() {
     status = { ...status, state: 'interrupted', note: '上次任务状态不完整，已停止且关闭定时。', running: false, tabId: null, updatedAt: new Date().toISOString() };
   }
   status = await syncSchedule(settings, status);
-  await saveState({ settings, status, job });
+  const changes = Object.fromEntries(Object.entries({ settings, status, job })
+    .filter(([key, value]) => JSON.stringify(stored[key]) !== JSON.stringify(value)));
+  if (Object.keys(changes).length) await saveState(changes);
+  // Also restore a missing badge after browser startup when stored data is
+  // already normalized; an ordinary worker wake uses the session cache.
+  await updateToolbar({ settings, status });
 }
 
 const ready = exclusive(initialize);

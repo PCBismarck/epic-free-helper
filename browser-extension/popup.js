@@ -35,6 +35,9 @@ const gameStates = {
 let snapshot = { settings: { enabled: false }, status: { state: 'loading', games: [] }, job: null };
 let busy = false;
 let loaded = false;
+let initialChanges = {};
+let timeFormatter;
+let renderedGamesKey;
 
 function plainText(value, maximum = 600) {
   return typeof value === 'string' ? value.slice(0, maximum) : '';
@@ -58,34 +61,45 @@ function displayTime(value) {
   if (typeof value !== 'string' && typeof value !== 'number') return '尚未运行';
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return '尚未运行';
-  return new Intl.DateTimeFormat('zh-CN', {
+  timeFormatter ||= new Intl.DateTimeFormat('zh-CN', {
     timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', hour12: false,
-  }).format(date);
+  });
+  return timeFormatter.format(date);
 }
 
 function renderGames(status) {
-  const games = Array.isArray(status.games) ? status.games.filter(game => game && typeof game === 'object') : [];
-  elements['game-list'].replaceChildren();
+  const games = Array.isArray(status.games) ? status.games.slice(0, 10)
+    .filter(game => game && typeof game === 'object').map(game => ({
+      title: plainText(game.title, 200) || '未命名游戏',
+      url: storeLink(game.url), reason: plainText(game.reason, 300),
+      status: plainText(game.status, 40),
+    })) : [];
   elements['empty-games'].hidden = games.length > 0;
   elements['empty-games'].textContent = status.state === 'no_free_games'
     ? '本周暂无可领取游戏' : status.running || status.state === 'running'
       ? '正在检查本周游戏…' : '尚无领取记录';
+  // Progress notes and button states change more often than the game list.
+  // Keep existing links and layout when their displayed data has not changed.
+  const key = JSON.stringify(games);
+  if (key === renderedGamesKey) return;
+  renderedGamesKey = key;
+  const items = document.createDocumentFragment();
   for (const game of games) {
     const item = document.createElement('li');
     const details = document.createElement('div');
     details.className = 'game-details';
-    const url = storeLink(game.url);
+    const url = game.url;
     const title = document.createElement(url ? 'a' : 'span');
     title.className = 'game-title';
-    title.textContent = plainText(game.title, 200) || '未命名游戏';
+    title.textContent = game.title;
     if (url) {
       title.href = url;
       title.target = '_blank';
       title.rel = 'noopener noreferrer';
     }
     details.append(title);
-    const reason = plainText(game.reason, 300);
+    const reason = game.reason;
     if (reason) {
       const explanation = document.createElement('small');
       explanation.className = 'game-reason';
@@ -98,8 +112,9 @@ function renderGames(status) {
     badge.textContent = label;
     badge.dataset.tone = tone;
     item.append(details, badge);
-    elements['game-list'].append(item);
+    items.append(item);
   }
+  elements['game-list'].replaceChildren(items);
 }
 
 function render() {
@@ -133,6 +148,22 @@ function acceptSnapshot(response) {
   if (response && Object.hasOwn(response, 'job')) snapshot.job = response.job;
 }
 
+async function loadSnapshot() {
+  try {
+    // Viewing saved results must not wake the claim worker, run recovery,
+    // rewrite storage or redraw Chrome's toolbar. Commands still go through
+    // the worker's initialization and validation when explicitly requested.
+    const stored = await chrome.storage.local.get(['settings', 'status', 'job']);
+    acceptSnapshot({ status: { state: 'idle', games: [] }, job: null, ...stored, ...initialChanges });
+    loaded = true;
+  } catch {
+    showNotice('暂时无法读取状态，请重新打开助手后重试。');
+  } finally {
+    initialChanges = null;
+    render();
+  }
+}
+
 async function request(type, extra = {}) {
   busy = true;
   showNotice();
@@ -160,10 +191,17 @@ elements['enabled-toggle'].addEventListener('change', event => request('setEnabl
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
-  if (changes.settings) snapshot.settings = changes.settings.newValue || { enabled: false };
-  if (changes.status) snapshot.status = changes.status.newValue || { state: 'idle', games: [] };
-  if (changes.job) snapshot.job = changes.job.newValue || null;
-  if (changes.settings || changes.status || changes.job) render();
+  const update = {};
+  if (changes.settings) update.settings = changes.settings.newValue || { enabled: false };
+  if (changes.status) update.status = changes.status.newValue || { state: 'idle', games: [] };
+  if (changes.job) update.job = changes.job.newValue || null;
+  if (Object.keys(update).length) {
+    // An update received during the first read is newer than that read's
+    // snapshot; do not replace it with an older completed/paused task.
+    if (initialChanges) Object.assign(initialChanges, update);
+    acceptSnapshot(update);
+    render();
+  }
 });
 
-request('getStatus');
+void loadSnapshot();
