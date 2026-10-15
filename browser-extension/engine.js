@@ -27,21 +27,40 @@ export function pageAction(action, game) {
     [...document.querySelectorAll('iframe[src*="hcaptcha"], iframe[src*="recaptcha"], iframe[src*="challenges.cloudflare.com"]')].some(visible);
   if (blocked) return { challenge: true };
   const nav = document.querySelector('egs-navigation');
-  const button = [...document.querySelectorAll('button[data-testid="purchase-cta-button"]')].find(visible);
+  const legacySelector = 'button[data-testid="purchase-cta-button"]';
+  // The redesigned store removed purchase-cta-button. Match its primary
+  // sidebar component without pinning a generated CSS hash; never select an
+  // arbitrary Get/Gift button from a recommendation or an add-on card.
+  const sidebarSelector = 'main section[class*="_sidebar_"]';
+  const primarySelector = `${legacySelector}, ${sidebarSelector} button[class*="_sidebarBuyButton_"]`;
+  const candidates = [...document.querySelectorAll(primarySelector)]
+    .filter(el => visible(el) && !el.closest('[role="dialog"]'));
+  const button = candidates.length === 1 ? candidates[0] : null;
+  const sidebar = button?.closest(sidebarSelector);
   const freeTexts = new Set();
-  let scope = button?.parentElement;
-  for (let depth = 0; scope && depth < 6; depth++, scope = scope.parentElement) {
-    if (scope.tagName === 'BODY' || scope.querySelectorAll('button[data-testid="purchase-cta-button"]').length !== 1 || text(scope).length > 2000) break;
-    for (const el of scope.querySelectorAll('[data-testid*="price" i], [data-component*="price" i], [class*="price" i]')) {
-      if (visible(el)) freeTexts.add(text(el));
-    }
-    for (const el of scope.querySelectorAll('span,div')) {
-      if (!el.children.length && visible(el) && /^(free|免费|kostenlos|gratuit|gratis)$/i.test(text(el))) freeTexts.add(text(el));
+  if (sidebar) {
+    const groups = [...sidebar.querySelectorAll('[role="group"][class*="_sidebarPrice_"]')].filter(visible);
+    const prices = groups.length === 1
+      ? [...groups[0].querySelectorAll('[class*="_currentPrice_"]')].filter(visible) : [];
+    // The original price, sale description, gift and DLC prices cannot prove
+    // this game's current price. Missing or ambiguous evidence fails closed.
+    if (prices.length === 1) freeTexts.add(text(prices[0]));
+  } else {
+    let scope = button?.parentElement;
+    for (let depth = 0; scope && depth < 6; depth++, scope = scope.parentElement) {
+      if (scope.tagName === 'BODY' || scope.querySelectorAll(legacySelector).length !== 1 || text(scope).length > 2000) break;
+      for (const el of scope.querySelectorAll('[data-testid*="price" i], [data-component*="price" i], [class*="price" i]')) {
+        if (visible(el)) freeTexts.add(text(el));
+      }
+      for (const el of scope.querySelectorAll('span,div')) {
+        if (!el.children.length && visible(el) && /^(free|免费|kostenlos|gratuit|gratis)$/i.test(text(el))) freeTexts.add(text(el));
+      }
     }
   }
   const evidence = {
-    url: location.href, cta: text(button), ready: !!button && !button.disabled,
+    url: location.href, cta: text(button), ready: !!button && !button.disabled && button.getAttribute('aria-disabled') !== 'true',
     loggedIn: nav?.getAttribute('isloggedin') || null, freeTexts: [...freeTexts],
+    productIssue: candidates.length > 1 ? 'ambiguous_product_button' : !button ? 'missing_product_button' : null,
     needsLogin: /\/id\/login|\/login(?:\/|$)/i.test(location.pathname),
   };
   const allowedGet = /^(get|claim|claim now|get for free|free|获取|领取|免费|免费获取|免费领取)$/i;
@@ -271,8 +290,10 @@ export async function claimGame(tabId, game, isCancelled = () => false, onProgre
         ? '等待 60 秒后登录状态仍未就绪，已停止；请检查 Epic 登录状态'
         : sawOwned
           ? '已出现拥有状态，但未能持续确认；已停止且没有重复领取'
+          : lastState.productIssue === 'ambiguous_product_button'
+            ? '商品页出现多个主按钮，无法确认领取目标；已停止并保留页面'
           : !lastState.cta
-            ? '等待 60 秒后商品按钮仍未加载，已停止；请检查页面或网络'
+            ? '等待 60 秒后仍未识别商品按钮；页面可能未加载完成或已改版，已停止并保留页面'
             : '等待 60 秒后商品按钮仍未稳定，已停止；请查看保留的页面';
     throw error;
   };

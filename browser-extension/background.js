@@ -270,7 +270,7 @@ async function executeRun(run) {
         const note = game.status === 'needs_login'
           ? '需要登录，已保留领取页并关闭定时。完成登录后点击“继续任务”。'
           : manual
-            ? '需要人工检查或安全验证，已保留领取页并关闭定时。处理后点击“继续任务”。'
+            ? `${game.reason || '页面状态需要人工确认'}；已保留领取页并关闭定时。处理后点击“继续任务”。`
             : '本轮领取失败，已关闭领取页和定时。请查看下方结果后再手动试领。';
         await finishRun(run, game.status, note, manual);
         return;

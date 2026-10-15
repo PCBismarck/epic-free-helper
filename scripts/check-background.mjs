@@ -255,4 +255,12 @@ await test('failed toolbar updates are not cached as successful across worker sl
  assert.equal(restarted.toolbarHistory.length,4);assert.ok(restarted.sessionData.epicToolbarKey);
 });
 
+await test('manual pause shows its actual cause instead of implying a security challenge',async()=>{
+ const reason='未识别商品按钮，页面结构可能已变化';
+ const m=await make({engine:async()=>({status:'needs_attention',reason})});
+ await m.message('runNow');await m.settle();
+ assert.ok(m.local.status.note.includes(reason));assert.doesNotMatch(m.local.status.note,/验证码|安全验证/);
+ assert.equal(m.local.job.phase,'manual');assert.equal(m.toolbar.text,'!');
+});
+
 console.log(`Passed ${count} mocked lifecycle checks; no browser was launched.`);

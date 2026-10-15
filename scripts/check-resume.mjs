@@ -47,10 +47,15 @@ const emitSource = game => `const emit = async kind => {
   if (!response.ok) throw new Error('Fixture telemetry failed');
 };`;
 function product(game) {
+  const primary = game.id === games[0].id
+    ? `<div><span data-testid="price">Free</span><button data-testid="purchase-cta-button" disabled>In Library</button></div>`
+    : `<section class="_sidebar_fixture_1"><div role="group" class="_sidebarPrice_fixture_2"><span class="_originalPrice_fixture_3"><s>$10.00</s></span><span class="_currentPrice_fixture_4">Free</span></div>
+       <button class="_sidebarBuyButton_fixture_5" ${owned.has(game.id) ? 'disabled' : ''}>${owned.has(game.id) ? 'In Library' : 'Get'}</button>
+       <button class="_sidebarGiftButton_fixture_6">Gift</button></section>`;
   return `<!doctype html><html><head><link rel="icon" href="data:,"></head><body>
-    <egs-navigation isloggedin="true"></egs-navigation><h1>${game.title}</h1>
-    <div><span data-testid="price">Free</span><button data-testid="purchase-cta-button" ${owned.has(game.id) ? 'disabled' : ''}>${owned.has(game.id) ? 'In Library' : 'Get'}</button></div>
+    <egs-navigation isloggedin="true"></egs-navigation><main><h1>${game.title}</h1>${primary}</main>
     <script>${emitSource(game)}
+      document.querySelector('[class*="_sidebarGiftButton_"]')?.addEventListener('click',()=>{throw new Error('Gift must never be clicked');});
       document.querySelector('button').onclick=async()=>{
         await emit('get');const frame=document.createElement('iframe');
         frame.src=${JSON.stringify(checkoutUrl(game))};frame.width=600;frame.height=500;document.body.append(frame);

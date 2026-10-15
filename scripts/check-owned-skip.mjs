@@ -60,13 +60,16 @@ const payload = { data: { Catalog: { searchStore: { elements: fixtures.map(game 
 })) } } } };
 
 function html(game) {
+  const redesigned = game.slug === 'skip-fixture-two';
+  const primary = redesigned
+    ? '<section class="_sidebar_fixture_1"><div role="group" class="_sidebarPrice_fixture_2"><span class="_currentPrice_fixture_3">免费</span></div><button class="_sidebarBuyButton_fixture_4">获取</button></section>'
+    : '<div><span data-testid="price">免费</span><button data-testid="purchase-cta-button">获取</button></div>';
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
     <title>${game.title}</title><link rel="icon" href="data:,">
     <style>body{font-family:sans-serif}egs-navigation{display:block;height:24px}
     button{padding:12px}main{max-width:600px;padding:24px}</style></head><body>
     <egs-navigation isloggedin="false"></egs-navigation>
-    <main><h1>${game.title}</h1><div><span data-testid="price">免费</span>
-    <button data-testid="purchase-cta-button">获取</button></div></main>
+    <main><h1>${game.title}</h1>${primary}</main>
     <script>
       const emit = detail => {
         if (!navigator.sendBeacon(${JSON.stringify(eventUrl)}, JSON.stringify({
@@ -76,7 +79,7 @@ function html(game) {
       document.addEventListener('click', event => {
         const target = event.target.closest('button');
         if (!target) return;
-        if (target.matches('[data-testid="purchase-cta-button"]')) {
+        if (target.matches('[data-testid="purchase-cta-button"], [class*="_sidebarBuyButton_"]')) {
           emit({ kind: 'click', action: 'get', label: target.innerText });
         } else if (/add to library|place order|添加到库|下单/i.test(target.innerText)) {
           emit({ kind: 'click', action: 'submit', label: target.innerText });
@@ -86,7 +89,7 @@ function html(game) {
       // deadline. It must still skip ownership without any Get/Submit click.
       setTimeout(() => document.querySelector('egs-navigation').setAttribute('isloggedin', 'true'), ${game.slug === 'skip-fixture-one' ? 45000 : 450});
       setTimeout(() => {
-        const button = document.querySelector('[data-testid="purchase-cta-button"]');
+        const button = document.querySelector('[data-testid="purchase-cta-button"], [class*="_sidebarBuyButton_"]');
         button.innerText = '已在库中';
         button.disabled = true;
         emit({ kind: 'owned' });

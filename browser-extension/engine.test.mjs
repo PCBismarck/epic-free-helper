@@ -825,7 +825,8 @@ for (const [name, loading] of [
 }
 for (const [name, initial, reason] of [
   ['login unknown', product({ loggedIn: null }), /登录状态仍未就绪/],
-  ['CTA missing', product({ cta: '', ready: false }), /商品按钮仍未加载/],
+  ['CTA missing', product({ cta: '', ready: false }), /仍未识别商品按钮.*已改版/],
+  ['CTA ambiguous', product({ cta: '', ready: false, productIssue: 'ambiguous_product_button' }), /多个主按钮/],
   ['CTA disabled', product({ ready: false }), /商品按钮仍未稳定/],
 ]) {
   test(`readiness timeout explains ${name} and never clicks`, async t => {

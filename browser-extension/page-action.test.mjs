@@ -192,6 +192,102 @@ function productFixture(t, { cta = 'Get', loggedIn = 'true', disabled = false } 
   return page;
 }
 
+const SIDEBAR = readFileSync(new URL('./fixtures/product-sidebar.html', import.meta.url), 'utf8');
+function sidebarFixture(t, options = {}) {
+  const markup = options.markup ?? SIDEBAR;
+  const page = fixture(t, { root: true, url: options.url ?? GAME.url,
+    markup: `<egs-navigation isloggedin="${options.loggedIn ?? 'true'}"></egs-navigation>${markup}${options.extra ?? ''}` });
+  const button = page.document.querySelector('button[class*="_sidebarBuyButton_"]');
+  button.disabled = options.owned === true;
+  button.textContent = options.cta ?? (options.owned ? '已在库中' : '获取');
+  return { ...page, button,
+    price: page.document.querySelector('[class*="_currentPrice_"]'),
+    sidebar: page.document.querySelector('main section') };
+}
+
+for (const cta of ['已在库中', 'In Library', '已拥有']) {
+  test(`redesigned sidebar recognizes disabled ownership without the old test ID: ${cta}`, t => {
+    const page = sidebarFixture(t, { owned: true, cta });
+    assert.equal(page.document.querySelector('[data-testid="purchase-cta-button"]'), null);
+    assert.equal(page.inspect().cta, cta);
+    assert.equal(page.inspect().ready, false);
+    assert.deepEqual(page.get(), { owned: true });
+    assert.equal(page.clicks(), 0);
+  });
+}
+
+test('redesigned sidebar gets the one zero-price base game while ignoring adjacent gift and DLC actions', t => {
+  const page = sidebarFixture(t, { extra: '<article><span>免费</span><button>获取</button></article>',
+    markup: SIDEBAR.replace('</section>', '<button class="_sidebarGiftButton_fixture_1">礼物</button></section>') });
+  assert.deepEqual(page.inspect().freeTexts, ['免费']);
+  assert.deepEqual(page.get(), { clicked: true });
+  assert.equal(page.clicks(), 1);
+});
+
+test('redesigned sidebar does not depend on generated CSS hashes or translated button text', t => {
+  const page = sidebarFixture(t, { cta: 'Get', markup: SIDEBAR.replaceAll('96vuv', 'otherHash').replaceAll('1fh4r', 'newHash') });
+  page.price.textContent = '$0.00';
+  assert.deepEqual(page.get(), { clicked: true });
+  assert.equal(page.clicks(), 1);
+});
+
+test('a paid current sidebar price cannot borrow Free from its old price, description or another card', t => {
+  const page = sidebarFixture(t, { extra: '<article><span class="_currentPrice_extra_1">免费</span><button>获取</button></article>' });
+  page.price.textContent = '¥9.99';
+  page.sidebar.querySelector('[class*="_originalPrice_"]').textContent = '免费';
+  page.sidebar.querySelector('p').textContent = '免费';
+  assert.deepEqual(page.inspect().freeTexts, ['¥9.99']);
+  assert.deepEqual(page.get(), { refused: true });
+  assert.equal(page.clicks(), 0);
+});
+
+for (const [name, mutate] of [
+  ['two visible primary buttons', p => p.button.after(p.button.cloneNode(true))],
+  ['two current prices', p => p.price.after(p.price.cloneNode(true))],
+  ['two price groups', p => { const group=p.price.closest('[role="group"]');group.after(group.cloneNode(true)); }],
+  ['hidden current price', p => { p.price.hidden = true; }],
+  ['missing current price', p => p.price.remove()],
+  ['hidden primary button', p => { p.button.hidden = true; }],
+  ['disabled primary button', p => { p.button.disabled = true; }],
+  ['aria-disabled primary button', p => p.button.setAttribute('aria-disabled', 'true')],
+  ['Gift replacing Get', p => { p.button.textContent = 'Gift'; }],
+  ['sidebar outside main', p => p.document.body.append(p.sidebar)],
+  ['sidebar inside a dialog', p => p.sidebar.setAttribute('role', 'dialog')],
+  ['lost login', p => p.document.querySelector('egs-navigation').setAttribute('isloggedin', 'false')],
+]) {
+  test(`redesigned sidebar refuses unsafe or ambiguous evidence: ${name}`, t => {
+    const page = sidebarFixture(t);mutate(page);
+    assert.notEqual(page.get().clicked, true);
+    assert.equal(page.clicks(), 0);
+  });
+}
+
+test('a hidden responsive copy does not hide the single visible product button', t => {
+  const page = sidebarFixture(t);
+  const copy = page.button.cloneNode(true);copy.hidden = true;page.button.after(copy);
+  assert.deepEqual(page.get(), { clicked: true });
+  assert.equal(page.clicks(), 1);
+});
+
+test('two visible owned product buttons do not falsely establish ownership', t => {
+  const page = sidebarFixture(t, { owned: true });page.button.after(page.button.cloneNode(true));
+  assert.equal(page.inspect().productIssue, 'ambiguous_product_button');
+  assert.equal(page.inspect().cta, '');
+  assert.notEqual(page.get().owned, true);
+  assert.equal(page.clicks(), 0);
+});
+
+test('redesigned Get rechecks the live current price and exact product URL', t => {
+  const page = sidebarFixture(t);
+  assert.deepEqual(page.inspect().freeTexts, ['免费']);
+  page.price.textContent = '¥1.00';
+  assert.deepEqual(page.get(), { refused: true });
+  page.price.textContent = '免费';
+  globalThis.location = new URL('https://store.epicgames.com/p/a-different-product');
+  assert.deepEqual(page.get(), { refused: true, needsLogin: false });
+  assert.equal(page.clicks(), 0);
+});
+
 for (const cta of ['In Library', '已在库中', '已拥有']) {
   test(`Get invocation recognizes ${cta} without clicking its disabled button`, t => {
     const page = productFixture(t, { cta, disabled: true });
