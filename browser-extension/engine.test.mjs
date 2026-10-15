@@ -35,6 +35,10 @@ const freeCheckoutOrder = (extra = {}) => ({ order: {
   checkoutUrl: `https://store.epicgames.com/purchase?offers=1-${GAME.namespace}-${GAME.id}--#/free-checkout`,
   itemPriceText: '¥0.00', hasFreeContent: true, totalText: '', ...extra,
 } });
+const tokenCheckoutOrder = (extra = {}) => freeCheckoutOrder({
+  checkoutUrl: 'https://store.epicgames.com/checkout?locale=zh-CN#/free-checkout',
+  identity: { namespace: GAME.namespace, offerId: GAME.id, quantity: 1, tokenBound: true }, ...extra,
+});
 
 function harness(t, options = {}) {
   const h = {
@@ -339,12 +343,12 @@ test('a captcha on arrival stops immediately without any claim clicks or polling
   assert.deepEqual(h.delays, []);
 });
 
-test('a captcha after Get stops without submitting or retrying Get', async t => {
+test('a persistent captcha after Get waits then pauses without submitting or retrying Get', async t => {
   const h = harness(t, { afterGet: () => ({ challenge: true }) });
   assert.equal((await h.run()).status, 'needs_attention');
   assert.equal(h.getClicks, 1);
   assert.equal(h.submitClicks, 0);
-  assert.equal(h.now - NOW, 3000);
+  assert.ok(h.now - NOW >= 63000 && h.now - NOW < 64000);
 });
 
 test('a captcha in the trusted checkout frame stops before Submit', async t => {
@@ -352,6 +356,47 @@ test('a captcha in the trusted checkout frame stops before Submit', async t => {
   assert.equal((await h.run()).status, 'needs_attention');
   assert.equal(h.getClicks, 1);
   assert.equal(h.submitClicks, 0);
+});
+
+for (const frameId of [0, 1]) {
+  test(`a transient pre-submit verification in frame ${frameId} clears within the same run`, async t => {
+    const notes = [];
+    const h = harness(t, {
+      progress: async note => notes.push(note),
+      inspect: (state, id, fallback) => id === frameId && state.getClicks && !state.submitClicks && state.now < NOW + 8000
+        ? { challenge: true } : fallback(id),
+    });
+    assert.equal((await h.run()).status, 'claimed');
+    assert.equal(h.getAttempts, 1);
+    assert.equal(h.submitAttempts, 1);
+    assert.ok(h.injections.find(i => i.action === 'submit').at >= NOW + 8000);
+    assert.equal(notes.filter(n => /结账页正在等待安全验证/.test(n)).length, 1);
+    assert.equal(notes.filter(n => /继续核验订单/.test(n)).length, 1);
+  });
+}
+
+test('a transient root verification after submission continues without repeating the order', async t => {
+  const h = harness(t, { afterSubmit: state => state.afterSubmitReads < 5 ? { challenge: true } : owned() });
+  assert.equal((await h.run()).status, 'claimed');
+  assert.equal(h.getAttempts, 1);
+  assert.equal(h.submitAttempts, 1);
+});
+
+test('a persistent root verification after submission preserves the original checkout', async t => {
+  const h = harness(t, { afterSubmit: () => ({ challenge: true }) });
+  const result = await h.run();
+  assert.equal(result.status, 'needs_attention');
+  assert.match(result.reason, /提交订单后出现安全验证/);
+  assert.equal(h.submitAttempts, 1);
+  assert.equal(h.navigations.length, 1);
+});
+
+test('stopping during pre-submit verification performs no later submission', async t => {
+  const h = harness(t, { afterGet: () => ({ challenge: true }), delay: state => {
+    if (state.getClicks && state.now >= NOW + 6000) state.cancelled = true;
+  } });
+  assert.equal((await h.run()).status, 'failed');
+  assert.equal(h.submitAttempts, 0);
 });
 
 test('cancellation before the run prevents even navigation and injection', async t => {
@@ -412,6 +457,39 @@ test('the new free-checkout branch rechecks the API and submits at most once bef
   assert.equal(h.getClicks, 1);
   assert.equal(h.submitClicks, 1);
   assert.equal(h.verificationReads, 3);
+});
+
+test('token checkout verifies the bound identity then submits once and confirms ownership', async t => {
+  const h = harness(t, { inspect: (state, frameId, fallback) => frameId === 1 ? tokenCheckoutOrder() : fallback(frameId) });
+  assert.equal((await h.run()).status, 'claimed');
+  assert.equal(h.getAttempts, 1);
+  assert.equal(h.submitAttempts, 1);
+  assert.equal(h.navigations.length, 2);
+});
+
+for (const [name, identity] of [
+  ['missing', null],
+  ['unbound', { namespace: GAME.namespace, offerId: GAME.id, quantity: 1, tokenBound: false }],
+  ['wrong offer', { namespace: GAME.namespace, offerId: 'other', quantity: 1, tokenBound: true }],
+  ['wrong namespace', { namespace: 'other', offerId: GAME.id, quantity: 1, tokenBound: true }],
+  ['wrong quantity', { namespace: GAME.namespace, offerId: GAME.id, quantity: 2, tokenBound: true }],
+]) {
+  test(`the background independently rejects ${name} token-checkout identity`, async t => {
+    const h = harness(t, { inspect: (state, frameId, fallback) => frameId === 1 ? tokenCheckoutOrder({ identity }) : fallback(frameId) });
+    const result = await h.run();
+    assert.equal(result.status, 'needs_attention');
+    assert.match(result.reason, /商品身份|商品编号或数量/);
+    assert.equal(h.submitAttempts, 0);
+    assert.equal(h.navigations.length, 1);
+  });
+}
+
+test('continue reuses a verified token checkout without clicking Get again', async t => {
+  const h = harness(t, { resumeStage: 'checkout',
+    inspect: (state, frameId, fallback) => frameId === 1 ? tokenCheckoutOrder() : fallback(frameId) });
+  assert.equal((await h.run()).status, 'claimed');
+  assert.equal(h.getAttempts, 0);
+  assert.equal(h.submitAttempts, 1);
 });
 
 test('a free-checkout item that became paid in the API never submits', async t => {
@@ -739,6 +817,14 @@ test('localized checkout resolves the exact official offer then rechecks its DOM
   assert.equal(h.submitClicks, 1);
   assert.equal(h.injections.find(x => x.action === 'submit').title, LOCAL_TITLE);
   assert.equal(h.navigations.length, 2, 'a fresh product navigation must confirm ownership');
+});
+
+test('token checkout reads locale for an official localized title without exposing its token', async t => {
+  const h = harness(t, localizedOptions({ inspect: (state, frameId, fallback, expectedGame) => frameId === 1
+    ? tokenCheckoutOrder({ matchesTitle: expectedGame.title === LOCAL_TITLE }) : fallback(frameId) }));
+  assert.equal((await h.run()).status, 'claimed');
+  assert.equal(h.fetches.filter(url => url.includes('locale=zh-CN')).length, 1);
+  assert.equal(h.submitAttempts, 1);
 });
 
 for (const [name, change] of [

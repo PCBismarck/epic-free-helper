@@ -81,23 +81,42 @@ export function hasZeroCheckoutTotal(text) {
 // Total row. This exception requires that exact route and offer identity;
 // an arbitrary zero amount in a normal checkout is never sufficient.
 export function isVerifiedZeroCheckout(order, game) {
-  if (!order?.matchesTitle) return false;
-  if (order.kind === undefined || order.kind === 'total') return hasZeroCheckoutTotal(order.totalText);
-  if (order.kind !== 'free_checkout') return false;
+  return checkoutFailureReason(order, game) === null;
+}
+
+export function checkoutFailureReason(order, game) {
+  if (!order) return '尚未识别结账订单';
+  if (order.kind === undefined || order.kind === 'total') {
+    if (!order.matchesTitle) return '结账商品名称与当前游戏不一致';
+    return hasZeroCheckoutTotal(order.totalText) ? null : '结账总额缺失或不是零元';
+  }
+  if (order.kind !== 'free_checkout') return '尚不支持此结账页面结构';
   try {
     const url = new URL(order.checkoutUrl);
     const names = [...url.searchParams.keys()];
-    const allowedNames = new Set(['offers', 'highlightColor', 'lang', 'showNavigation']);
     if (url.origin !== 'https://store.epicgames.com' || url.username || url.password || url.port ||
-        url.pathname !== '/purchase' || url.hash !== '#/free-checkout' ||
-        names.some(name => !allowedNames.has(name)) ||
-        new Set(names).size !== names.length || url.searchParams.getAll('offers').length !== 1 ||
+        url.hash !== '#/free-checkout' || new Set(names).size !== names.length ||
         !/^[a-z0-9-]+$/i.test(game?.namespace || '') || !/^[a-z0-9-]+$/i.test(game?.id || '') ||
-        url.searchParams.get('offers') !== `1-${game.namespace}-${game.id}--`) return false;
-  } catch { return false; }
-  return order.hasFreeContent === true && /[0-9]/.test(order.itemPriceText || '') &&
-    isZeroPriceText(order.itemPriceText) && typeof order.totalText === 'string' &&
-    (order.totalText === '' || hasZeroCheckoutTotal(order.totalText));
+        !['/purchase', '/checkout'].includes(url.pathname)) return '结账地址或参数不受支持';
+    if (url.pathname === '/purchase') {
+      const allowedNames = new Set(['offers', 'highlightColor', 'lang', 'showNavigation']);
+      if (names.some(name => !allowedNames.has(name))) return '结账地址包含未识别参数';
+      if (url.searchParams.getAll('offers').length !== 1 ||
+          url.searchParams.get('offers') !== `1-${game.namespace}-${game.id}--`) return '结账商品编号与当前周免不一致';
+    } else {
+      // pageAction removes the purchase token and returns only a proof from
+      // the same document, avoiding checkout credentials in evidence/logs.
+      if (names.some(name => name !== 'locale')) return '结账地址包含未识别参数';
+      if (order.identity?.tokenBound !== true) return '新版结账缺少可核验的商品身份数据';
+      if (order.identity.namespace !== game.namespace || order.identity.offerId !== game.id ||
+          order.identity.quantity !== 1) return '结账商品编号或数量与当前周免不一致';
+    }
+  } catch { return '结账地址无法识别'; }
+  if (!order.matchesTitle) return '结账商品名称与当前游戏不一致';
+  if (!/[0-9]/.test(order.itemPriceText || '') || !isZeroPriceText(order.itemPriceText)) return '结账商品价格缺失或不是零元';
+  if (order.hasFreeContent !== true) return '结账免费说明或唯一添加到库按钮未通过核验';
+  if (typeof order.totalText !== 'string' || (order.totalText !== '' && !hasZeroCheckoutTotal(order.totalText))) return '结账总额缺失或不是零元';
+  return null;
 }
 
 export function summarizeClaim(games, override = null, now = new Date()) {

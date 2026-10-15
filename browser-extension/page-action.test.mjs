@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { parseHTML } from 'linkedom';
 import { pageAction } from './engine.js';
-import { isVerifiedZeroCheckout } from './rules.js';
+import { isVerifiedZeroCheckout, checkoutFailureReason } from './rules.js';
 
 const GAME = {
   title: 'Luftrausers', url: 'https://store.epicgames.com/p/luftrausers',
@@ -15,6 +15,10 @@ const URL_BASE = `https://store.epicgames.com/purchase?highlightColor=0078f2&lan
 const CHECKOUT_URL = `${URL_BASE}#/free-checkout`;
 const NOTICE = '这是免费内容。添加到库即可开始体验。';
 const LIVE_CARD = readFileSync(new URL('./fixtures/free-checkout-card.html', import.meta.url), 'utf8').trim();
+const TOKEN_INIT = readFileSync(new URL('./fixtures/token-checkout-init.html', import.meta.url), 'utf8')
+  .replace('fixture-namespace', GAME.namespace).replace('fixture-offer', GAME.id);
+const TOKEN = 'fixture-token-not-real-0001';
+const TOKEN_URL = `https://store.epicgames.com/checkout?purchaseToken=${TOKEN}&locale=zh-CN#/free-checkout`;
 
 function fixture(t, options = {}) {
   const title = options.title ?? GAME.title;
@@ -69,6 +73,88 @@ test('captured Chinese free-checkout DOM proves the single offer without inventi
   assert.equal(page.clicks(), 0);
   assert.deepEqual(page.submit(), { clicked: true });
   assert.equal(page.clicks(), 1);
+});
+
+function tokenFixture(t, options = {}) {
+  return fixture(t, { url: TOKEN_URL, ...options, extra: (options.init ?? TOKEN_INIT) + (options.extra ?? '') });
+}
+
+test('token checkout binds the server offer to the document token and strips it from evidence', t => {
+  const page = tokenFixture(t, { init: TOKEN_INIT.replace('"lineOffers":', '"displayName":"private-fixture-name","identityId":"private-fixture-id","lineOffers":') });
+  const state = page.inspect();
+  assert.equal(state.order.checkoutUrl, 'https://store.epicgames.com/checkout?locale=zh-CN#/free-checkout');
+  assert.deepEqual(state.order.identity, { namespace: GAME.namespace, offerId: GAME.id, quantity: 1, tokenBound: true });
+  assert.equal(isVerifiedZeroCheckout(state.order, GAME), true);
+  assert.doesNotMatch(JSON.stringify(state), /purchaseToken|fixture-token|private-fixture/);
+  assert.equal(page.clicks(), 0);
+  assert.deepEqual(page.submit(), { clicked: true });
+  assert.equal(page.clicks(), 1);
+});
+
+for (const [name, options] of [
+  ['missing initialization', { init: '' }],
+  ['missing token assignment', { init: TOKEN_INIT.replace(/window\.purchaseToken[^\n]+/, '') }],
+  ['a different initialized token', { init: TOKEN_INIT.replace(TOKEN, 'another-fixture-token-0001') }],
+  ['a missing URL token', { url: TOKEN_URL.replace(`purchaseToken=${TOKEN}&`, '') }],
+  ['duplicate token parameters', { url: TOKEN_URL.replace('#', `&purchaseToken=${TOKEN}#`) }],
+  ['duplicate locale parameters', { url: TOKEN_URL.replace('#', '&locale=en-US#') }],
+  ['an unexpected cart parameter', { url: TOKEN_URL.replace('#', '&cartId=other#') }],
+  ['an offers parameter mixed with the token', { url: TOKEN_URL.replace('#', `&offers=${OFFER}#`) }],
+  ['the wrong namespace', { init: TOKEN_INIT.replace(GAME.namespace, 'other-namespace') }],
+  ['the wrong offer', { init: TOKEN_INIT.replace(GAME.id, 'other-offer') }],
+  ['two offers', { init: TOKEN_INIT.replace('"lineOffers":[', '"lineOffers":[{"namespace":"other","offerId":"other","quantity":1},') }],
+  ['quantity two', { init: TOKEN_INIT.replace('"quantity":1', '"quantity":2') }],
+  ['string quantity', { init: TOKEN_INIT.replace('"quantity":1', '"quantity":"1"') }],
+  ['sub-offers', { init: TOKEN_INIT.replace('"ownedSubOffers":[]', '"ownedSubOffers":[{}]') }],
+  ['duplicate initialization scripts', { init: TOKEN_INIT + TOKEN_INIT }],
+  ['a duplicate token on the same line', { init: TOKEN_INIT.replace(`'${TOKEN}';`, `'${TOKEN}';window.purchaseToken='${TOKEN}';`) }],
+  ['a nonliteral preload expression', { init: TOKEN_INIT.replace('= {', '= (() => ({').replace('}]};', '}]}))();') }],
+  ['an external initialization script', { init: TOKEN_INIT.replace('<script>', '<script src="https://example.org/init.js">') }],
+  ['an oversized initialization script', { init: TOKEN_INIT.replace('</script>', ' '.repeat(250000) + '</script>') }],
+  ['a paid current price', { amount: '¥0.01' }],
+  ['the wrong title', { title: 'Another Game' }],
+  ['an additional product card', { extra: '<div><span>Another Game</span><span>¥0.00</span></div>' }],
+  ['a paid total', { extra: '<div>Total</div><div>¥9.99</div>' }],
+  ['a missing free-content notice', { notice: '游戏说明' }],
+  ['a duplicate submit button', { extra: '<button>添加到库</button>' }],
+  ['another checkout origin', { url: TOKEN_URL.replace('store.epicgames.com', 'www.epicgames.com') }],
+  ['URL credentials', { url: TOKEN_URL.replace('https://', 'https://user:pass@') }],
+]) {
+  test(`token checkout rejects ${name} without a click`, t => {
+    const page = tokenFixture(t, options);
+    assert.equal(isVerifiedZeroCheckout(page.inspect().order, GAME), false);
+    assert.notEqual(page.submit().clicked, true);
+    assert.equal(page.clicks(), 0);
+  });
+}
+
+test('static checkout initialization accepts JSON whitespace and semicolons inside strings without executing scripts', t => {
+  const init = TOKEN_INIT.replace('"lineOffers":', '"unused":"a; b \\" c",\n "lineOffers":')
+    .replace(`'${TOKEN}'`, `"${TOKEN}"`);
+  const page = tokenFixture(t, { init });
+  assert.equal(isVerifiedZeroCheckout(page.inspect().order, GAME), true);
+  assert.deepEqual(page.submit(), { clicked: true });
+});
+
+for (const [name, mutate] of [
+  ['URL token changed', page => { globalThis.location = new URL(TOKEN_URL.replace(TOKEN, 'changed-fixture-token-0001')); }],
+  ['server offer changed', page => { page.document.querySelector('script').textContent = TOKEN_INIT.replace(GAME.id, 'another-offer'); }],
+  ['price changed', page => { page.itemPrice().textContent = '¥10.00'; }],
+  ['submit became aria-disabled', page => { page.document.querySelector('button').setAttribute('aria-disabled', 'true'); }],
+]) {
+  test(`token checkout rechecks before submission when ${name}`, t => {
+    const page = tokenFixture(t);
+    assert.equal(isVerifiedZeroCheckout(page.inspect().order, GAME), true);
+    mutate(page);
+    assert.notEqual(page.submit().clicked, true);
+    assert.equal(page.clicks(), 0);
+  });
+}
+
+test('checkout rejection explains a missing token identity without returning the token', t => {
+  const page = tokenFixture(t, { init: '' });
+  assert.match(checkoutFailureReason(page.inspect().order, GAME), /商品身份数据/);
+  assert.doesNotMatch(JSON.stringify(page.inspect()), /purchaseToken|fixture-token/);
 });
 
 test('a challenge inserted after submission is detected even with the submit button disabled', t => {

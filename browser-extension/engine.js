@@ -1,5 +1,5 @@
 import { PROMOTIONS_URL, canonicalProductUrl, selectWeeklyPcGames, isOwnedCta,
-  isAllowedFreeCta, isZeroPriceText, isVerifiedZeroCheckout } from './rules.js';
+  isAllowedFreeCta, isZeroPriceText, isVerifiedZeroCheckout, checkoutFailureReason } from './rules.js';
 
 // This function runs in the extension's isolated world, only in its own tab.
 // It returns price and state evidence; no cookies, credentials or account names.
@@ -22,6 +22,37 @@ export function pageAction(action, game) {
     value = value.replace(/(?:\b(?:USD|EUR|GBP|CNY|RMB|JPY|HKD|TWD|CAD|AUD|KRW|INR|BRL|RUB)\b|CN¥|US\$|HK\$|NT\$|R\$|[$€£¥￥₽₩₹])/gi, '').trim();
     return /^0+(?:[.,]0{1,3})?$/.test(value);
   };
+  // Read only static assignments from the server-rendered checkout document.
+  // Never evaluate page scripts or depend on React internals / the main world.
+  // Reject missing, duplicate, oversized or nonliteral assignments.
+  const inlineLiteral = name => {
+    const values = [];
+    for (const script of document.querySelectorAll('script:not([src])')) {
+      const source = script.textContent || '';
+      if (source.length > 250000) {
+        if (source.includes(name)) return null;
+        continue;
+      }
+      const pattern = new RegExp(`(?:^|[;\\r\\n])\\s*window\\.${name}\\s*=\\s*`, 'g');
+      for (const match of source.matchAll(pattern)) {
+        const start = match.index + match[0].length;
+        let quote = '', end = start;
+        for (; end < source.length; end++) {
+          const char = source[end];
+          if (quote) {
+            if (char === '\\') end++;
+            else if (char === quote) quote = '';
+          } else if (char === '"' || char === "'") quote = char;
+          else if (char === ';') break;
+        }
+        values.push(end < source.length ? source.slice(start, end).trim() : null);
+      }
+    }
+    return values.length === 1 ? values[0] : null;
+  };
+  const pageUrl = new URL(location.href);
+  const safeUrl = new URL(pageUrl);
+  if (safeUrl.pathname === '/checkout') safeUrl.searchParams.delete('purchaseToken');
   const body = (document.body?.innerText || '').slice(0, 60000);
   const blocked = /one more step|please complete a security check|verify you are human|验证您是真人/i.test(body) ||
     [...document.querySelectorAll('iframe[src*="hcaptcha"], iframe[src*="recaptcha"], iframe[src*="challenges.cloudflare.com"]')].some(visible);
@@ -58,7 +89,7 @@ export function pageAction(action, game) {
     }
   }
   const evidence = {
-    url: location.href, cta: text(button), ready: !!button && !button.disabled && button.getAttribute('aria-disabled') !== 'true',
+    url: safeUrl.href, cta: text(button), ready: !!button && !button.disabled && button.getAttribute('aria-disabled') !== 'true',
     loggedIn: nav?.getAttribute('isloggedin') || null, freeTexts: [...freeTexts],
     productIssue: candidates.length > 1 ? 'ambiguous_product_button' : !button ? 'missing_product_button' : null,
     needsLogin: /\/id\/login|\/login(?:\/|$)/i.test(location.pathname),
@@ -80,7 +111,8 @@ export function pageAction(action, game) {
     : [document.body].filter(Boolean);
   const orderPattern = /^(add to library|place order|添加到库|添加至游戏库|添加到游戏库|下单|获取|zur bibliothek hinzufügen|bestellung abschließen)$/i;
   for (const order of orderScopes) {
-    const submit = [...order.querySelectorAll('button')].find(el => visible(el) && !el.disabled && orderPattern.test(text(el)));
+    const submit = [...order.querySelectorAll('button')].find(el => visible(el) && !el.disabled &&
+      el.getAttribute('aria-disabled') !== 'true' && orderPattern.test(text(el)));
     if (!submit) continue;
     const lines = text(order).split(/[\r\n]+/).map(v => v.trim()).filter(Boolean);
     const totals = [];
@@ -100,12 +132,37 @@ export function pageAction(action, game) {
       const url = new URL(location.href);
       const names = [...url.searchParams.keys()];
       const allowedNames = new Set(['offers', 'highlightColor', 'lang', 'showNavigation']);
-      const matchesOffer = url.origin === 'https://store.epicgames.com' &&
+      let matchesOffer = url.origin === 'https://store.epicgames.com' &&
         !url.username && !url.password && !url.port && url.pathname === '/purchase' &&
         names.every(name => allowedNames.has(name)) &&
         new Set(names).size === names.length && url.searchParams.getAll('offers').length === 1 &&
         /^[a-z0-9-]+$/i.test(game.namespace || '') && /^[a-z0-9-]+$/i.test(game.id || '') &&
         url.searchParams.get('offers') === `1-${game.namespace}-${game.id}--`;
+      let identity;
+      if (url.pathname === '/checkout') {
+        // The token checkout carries offer identity in its server preload,
+        // not in the URL. Bind the sole offer to this document's exact token.
+        // Only the offer proof leaves the page; token/account data never does.
+        const allowed = new Set(['purchaseToken', 'locale']);
+        const token = url.searchParams.get('purchaseToken');
+        const routeValid = url.origin === 'https://store.epicgames.com' && !url.username && !url.password && !url.port &&
+          names.every(name => allowed.has(name)) && new Set(names).size === names.length &&
+          url.searchParams.getAll('purchaseToken').length === 1 && /^[a-z0-9._~-]{16,512}$/i.test(token || '');
+        try {
+          const preload = JSON.parse(inlineLiteral('__epic_web_purchase_dataPreload'));
+          const tokenLiteral = inlineLiteral('purchaseToken');
+          const boundToken = tokenLiteral?.match(/^(['"])([a-z0-9._~-]{16,512})\1$/i)?.[2];
+          const offers = preload?.lineOffers;
+          if (routeValid && boundToken === token && Array.isArray(offers) && offers.length === 1) {
+            const offer = offers[0];
+            if (offer && Array.isArray(offer.ownedSubOffers) && offer.ownedSubOffers.length === 0) {
+              identity = { namespace: offer.namespace, offerId: offer.offerId, quantity: offer.quantity, tokenBound: true };
+            }
+          }
+        } catch { /* Unrecognized initialization data cannot authorize an order. */ }
+        matchesOffer = identity?.tokenBound === true && identity.namespace === game.namespace &&
+          identity.offerId === game.id && identity.quantity === 1;
+      }
       const itemCards = [...order.querySelectorAll('div')].flatMap(el => {
         const children = [...el.children];
         const content = children.filter(child => text(child));
@@ -128,11 +185,12 @@ export function pageAction(action, game) {
       const hasFreeContent = [...order.querySelectorAll('h5')].some(el => visible(el) &&
         normalize(text(el)) === normalize('这是免费内容。添加到库即可开始体验。'));
       const addButtons = [...order.querySelectorAll('button')].filter(el => visible(el) &&
-        !el.disabled && /^(添加到库|add to library)$/i.test(text(el)));
+        !el.disabled && el.getAttribute('aria-disabled') !== 'true' && /^(添加到库|add to library)$/i.test(text(el)));
       verified = matchesOffer && matchesTitle && hasFreeContent && addButtons.length === 1 &&
         addButtons[0] === submit && /[0-9]/.test(itemPriceText) && zero(itemPriceText) && totals.every(zero);
-      evidence.order = { kind: 'free_checkout', matchesTitle, checkoutUrl: location.href,
-        itemPriceText, hasFreeContent: hasFreeContent && addButtons.length === 1 && addButtons[0] === submit, totalText };
+      evidence.order = { kind: 'free_checkout', matchesTitle, checkoutUrl: safeUrl.href,
+        itemPriceText, hasFreeContent: hasFreeContent && addButtons.length === 1 && addButtons[0] === submit, totalText,
+        ...(url.pathname === '/checkout' ? { identity: identity || null } : {}) };
     }
     if (action === 'submit') {
       const host = location.hostname;
@@ -176,7 +234,8 @@ async function stillFree(game) {
 }
 
 async function localizedCheckoutGame(game, order) {
-  const locale = new URL(order.checkoutUrl).searchParams.get('lang');
+  const url = new URL(order.checkoutUrl);
+  const locale = url.searchParams.get(url.pathname === '/checkout' ? 'locale' : 'lang');
   if (!locale || !/^[a-z]{2}(?:-[a-z]{2})?$/i.test(locale)) return null;
   const endpoint = new URL(PROMOTIONS_URL);
   endpoint.searchParams.set('locale', locale);
@@ -354,14 +413,13 @@ export async function claimGame(tabId, game, isCancelled = () => false, onProgre
         continue;
       }
       if (state.needsLogin) throw new Error('needs_login');
-      if (state.challenge) return attention('需要完成安全验证，自动领取已暂停');
-      if (canonicalProductUrl(state.url) !== game.url) return attention('结账发生未识别跳转，请在标签页查看');
+      if (!state.challenge && canonicalProductUrl(state.url) !== game.url) return attention('结账发生未识别跳转，请在标签页查看');
       // Keep inspecting checkout frames after the one allowed submission.
       // A challenge may appear there after clicking Add to Library and
       // must be checked before any ownership reload erases the checkout.
       const checkouts = [];
-      let checkoutChallenge = false;
-      const frames = await chrome.webNavigation.getAllFrames({ tabId });
+      let checkoutChallenge = !!state.challenge;
+      const frames = checkoutChallenge ? [] : await chrome.webNavigation.getAllFrames({ tabId });
       for (const frame of frames || []) {
         check();
         let url;
@@ -373,7 +431,6 @@ export async function claimGame(tabId, game, isCancelled = () => false, onProgre
           continue;
         }
         if (checkout.challenge) {
-          if (!submitted) return attention('结账要求安全验证，自动领取已暂停');
           checkoutChallenge = true;
           break;
         }
@@ -382,14 +439,16 @@ export async function claimGame(tabId, game, isCancelled = () => false, onProgre
       }
       if (checkoutChallenge) {
         // hCaptcha can briefly show its frame while performing an automatic
-        // check. Wait within the existing post-submit deadline, without any
-        // further clicks, so a transient frame does not abort a valid order.
-        if (!awaitingChallenge) await progress('提交后正在等待安全验证结果；如页面要求，请手动完成验证，不要重复提交');
+        // check before or after submission, in either root or child document.
+        // Keep the existing deadline and issue no clicks while it is visible.
+        if (!awaitingChallenge) await progress(`${submitted ? '提交后' : '结账页'}正在等待安全验证结果；如页面要求，请手动完成验证，不要重复提交`);
         awaitingChallenge = true;
         await delay(900);
         continue;
       }
-      if (awaitingChallenge) await progress('安全验证窗口已关闭，继续等待入库；不会重复提交');
+      if (awaitingChallenge) await progress(submitted
+        ? '安全验证窗口已关闭，继续等待入库；不会重复提交'
+        : '安全验证窗口已关闭，继续核验订单；尚未提交');
       awaitingChallenge = false;
       if (isOwnedCta(state.cta)) return await verify() ? { status: 'claimed' } : attention('领取后尚未确认入库');
       if (!submitted) {
@@ -411,9 +470,11 @@ export async function claimGame(tabId, game, isCancelled = () => false, onProgre
               if (!isNavigationReadError(error)) throw error;
               continue;
             }
-            if (checkout.challenge) return attention('结账要求安全验证，自动领取已暂停');
+            if (checkout.challenge) break; // Observe it again in the normal bounded wait loop.
           }
-          if (!isVerifiedZeroCheckout(checkout.order, orderGame) || !await stillFree(game)) return attention('订单商品或零元结账未通过核验，已停止');
+          const failure = checkoutFailureReason(checkout.order, orderGame);
+          if (failure) return attention(`${failure}，已停止并保留结账页`);
+          if (!await stillFree(game)) return attention('官方周免列表已无法确认该商品仍免费，未提交订单');
           await progress('订单已通过零元检查，正在提交', 'submitted');
           if (!(await read(frame.frameId, 'submit', checkout.documentId, orderGame)).clicked) return attention('提交前订单状态变化，已停止');
           submitted = true;
@@ -425,6 +486,7 @@ export async function claimGame(tabId, game, isCancelled = () => false, onProgre
       }
       await delay(900);
     }
+    if (!submitted && awaitingChallenge) return attention('结账页出现安全验证，等待 60 秒仍未完成，未提交订单；已保留原页面，完成验证后点“继续任务”');
     if (!submitted) return attention('点击获取后 60 秒内未找到可核验的结账页，未提交订单；已保留原页面，请检查是否有验证、弹窗或加载错误');
     if (awaitingChallenge) return attention('提交订单后出现安全验证，等待 60 秒仍未完成，已暂停并保留原页面；完成验证后点“继续任务”');
     return attention('提交一次订单后等待 60 秒仍未确认入库，已保留原页面且不会重复提交；处理后可点“继续任务”检查入库');

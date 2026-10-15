@@ -41,7 +41,10 @@ const payload = { data: { Catalog: { searchStore: { elements: games.map(game => 
 })) } } } };
 const eventUrl = 'https://store.epicgames.com/__resume_fixture_event';
 const challengeUrl = 'https://newassets.hcaptcha.com/resume-fixture';
-const checkoutUrl = game => `https://store.epicgames.com/purchase?offers=1-${game.namespace}-${game.id}--`;
+const checkoutToken = game => `offline-checkout-token-${game.id}`;
+const checkoutUrl = game => game.id === games[1].id
+  ? `https://store.epicgames.com/checkout?purchaseToken=${checkoutToken(game)}&locale=zh-CN#/free-checkout`
+  : `https://store.epicgames.com/purchase?offers=1-${game.namespace}-${game.id}--&lang=zh-CN#/free-checkout`;
 const emitSource = game => `const emit = async kind => {
   const response = await fetch(${JSON.stringify(eventUrl)}, {method:'POST',body:JSON.stringify({id:${JSON.stringify(game.id)},kind})});
   if (!response.ok) throw new Error('Fixture telemetry failed');
@@ -68,9 +71,19 @@ function product(game) {
     </script></body></html>`;
 }
 function checkout(game) {
-  return `<!doctype html><html><body><h1>${game.title}</h1><div>Total</div><div>$0.00</div><button>Place Order</button>
+  const tokenInit = game.id === games[1].id ? `<script>
+    window.__epic_web_purchase_dataPreload = ${JSON.stringify({ lineOffers: [{ namespace: game.namespace, offerId: game.id, quantity: 1, ownedSubOffers: [] }] })};
+    window.purchaseToken = '${checkoutToken(game)}';
+  </script>` : '';
+  return `<!doctype html><html><head><meta charset="utf-8"></head><body>${tokenInit}
+    <div><span style="display:block">${game.title}</span><span style="display:block">¥0.00</span></div>
+    <h5>这是免费内容。添加到库即可开始体验。</h5><button>添加到库</button>
     <button id="fixture-verify">Complete offline fixture verification</button>
     <script>${emitSource(game)}
+      if(${game.id === games[1].id}){
+        const transient=document.createElement('iframe');transient.src=${JSON.stringify(challengeUrl)};
+        document.body.append(transient);setTimeout(()=>transient.remove(),2500);
+      }
       window.finishFixtureVerification=async()=>{
         await emit('owned');window.parent.postMessage({kind:'owned',id:${JSON.stringify(game.id)}},'https://store.epicgames.com');
       };
@@ -113,7 +126,7 @@ async function check() {
       navigations[game.id]++;
       return route.fulfill({ status: 200, contentType: 'text/html', body: product(game) });
     }
-    const orderGame = games.find(item => checkoutUrl(item) === request.url());
+    const orderGame = games.find(item => checkoutUrl(item).split('#')[0] === request.url());
     if (orderGame) return route.fulfill({ status: 200, contentType: 'text/html', body: checkout(orderGame) });
     if (request.url() === challengeUrl) return route.fulfill({ status: 200, contentType: 'text/html', body: 'Offline verification placeholder' });
     return route.abort('blockedbyclient');
@@ -139,7 +152,9 @@ async function check() {
   await popup.goto(`${origin}/popup.html`);
   await popup.waitForFunction(() => !document.getElementById('run-button').disabled);
   await popup.click('#run-button');
-  await waitState(s => /等待安全验证/.test(s.status.note));
+  await waitState(s => /结账页正在等待安全验证/.test(s.status.note));
+  assert.equal(events.filter(e => e.kind === 'submit').length, 0, 'Transient pre-submit verification must not be clicked through');
+  await waitState(s => /提交后正在等待安全验证/.test(s.status.note));
   const tabId = state.job.tabId;
   assert.equal(state.job.games[0].status, 'already_owned');
   assert.equal(state.job.games[1].resumeStage, 'submitted');
