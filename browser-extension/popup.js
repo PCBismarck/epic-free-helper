@@ -3,6 +3,7 @@
 const elements = Object.fromEntries([
   'status-text', 'status-note', 'status-dot', 'updated-at', 'run-button',
   'resume-button', 'stop-button', 'enabled-toggle', 'notice', 'empty-games', 'game-list',
+  'keep-schedule-toggle', 'next-run', 'schedule-help',
 ].map(id => [id, document.getElementById(id)]));
 
 const states = {
@@ -133,6 +134,15 @@ function render() {
   elements['updated-at'].textContent = displayTime(status.updatedAt);
   elements['enabled-toggle'].checked = snapshot.settings?.enabled === true;
   elements['enabled-toggle'].disabled = busy || !loaded;
+  elements['keep-schedule-toggle'].checked = snapshot.settings?.keepScheduleOnFailure !== false;
+  elements['keep-schedule-toggle'].disabled = busy || !loaded;
+  elements['next-run'].textContent = snapshot.settings?.enabled === true
+    ? Number.isFinite(status.nextRunAt) && status.nextRunAt > 0
+      ? `下次检查：${displayTime(status.nextRunAt)}（北京时间）` : '每日定时已开启，等待安排下次检查'
+    : '每日定时已关闭；开启上方开关后才会自动检查';
+  elements['schedule-help'].textContent = snapshot.settings?.keepScheduleOnFailure !== false
+    ? '本轮暂停后，次日按原进度检查。验证码仍需手动完成。'
+    : '遇到登录、验证超时或领取失败时，会自动关闭每日定时。';
   elements['run-button'].hidden = resumable;
   elements['run-button'].disabled = busy || !loaded || running || Boolean(snapshot.job);
   elements['resume-button'].hidden = !resumable;
@@ -188,6 +198,7 @@ elements['run-button'].addEventListener('click', () => request('runNow'));
 elements['resume-button'].addEventListener('click', () => request('resume'));
 elements['stop-button'].addEventListener('click', () => request('stop'));
 elements['enabled-toggle'].addEventListener('change', event => request('setEnabled', { enabled: event.target.checked }));
+elements['keep-schedule-toggle'].addEventListener('change', event => request('setKeepScheduleOnFailure', { enabled: event.target.checked }));
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;

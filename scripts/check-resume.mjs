@@ -24,6 +24,7 @@ const cpu = limits.cpu.match(/^(\d+) (\d+)$/);
 assert.ok(cpu && BigInt(cpu[1]) > 0n && BigInt(cpu[1]) * 2n <= BigInt(cpu[2]) * 3n);
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+const scheduled = process.argv.includes('--scheduled');
 const directory = path.join(root, '.local/epic-free');
 mkdirSync(directory, { recursive: true });
 const games = [1, 2, 3].map(n => ({ title: `Continue Fixture ${n}`, id: `resume-offer-${n}`,
@@ -151,6 +152,15 @@ async function check() {
   let popup = await context.newPage();
   await popup.goto(`${origin}/popup.html`);
   await popup.waitForFunction(() => !document.getElementById('run-button').disabled);
+  if (scheduled) {
+    await popup.click('#keep-schedule-toggle');
+    await popup.waitForFunction(() => !document.getElementById('keep-schedule-toggle').disabled && !document.getElementById('keep-schedule-toggle').checked);
+    await popup.click('#keep-schedule-toggle');
+    await popup.waitForFunction(() => !document.getElementById('keep-schedule-toggle').disabled && document.getElementById('keep-schedule-toggle').checked);
+    await popup.click('#enabled-toggle');
+    await popup.waitForFunction(() => !document.getElementById('enabled-toggle').disabled && document.getElementById('enabled-toggle').checked);
+    assert.match(await popup.locator('#next-run').textContent(), /下次检查/);
+  }
   await popup.click('#run-button');
   await waitState(s => /结账页正在等待安全验证/.test(s.status.note));
   assert.equal(events.filter(e => e.kind === 'submit').length, 0, 'Transient pre-submit verification must not be clicked through');
@@ -164,6 +174,8 @@ async function check() {
   await waitState(s => s.job?.phase === 'manual' && !s.status.running);
   assert.equal(state.job.tabId, tabId);
   assert.equal(await worker.evaluate(() => chrome.action.getBadgeText({})), '!');
+  assert.equal(state.settings.enabled, scheduled);
+  if (scheduled) assert.ok(await worker.evaluate(() => chrome.alarms.get('epic-daily')));
   await popup.close();popup = await context.newPage();
   await popup.goto(`${origin}/popup.html`);
   await popup.waitForFunction(() => !document.getElementById('resume-button').hidden && !document.getElementById('resume-button').disabled);
@@ -174,13 +186,17 @@ async function check() {
   assert.ok(frame);
   // This is an offline fixture state change, never a real CAPTCHA operation.
   await frame.click('#fixture-verify');
-  await popup.click('#resume-button');
-  await waitState(s => s.job?.source === 'resume' && s.status.running);
+  if (scheduled) {
+    // A real alarm in this isolated profile exercises the production daily
+    // handler. It must resume the submitted checkpoint, not start over.
+    await worker.evaluate(when => chrome.alarms.create('epic-daily', { when }), Date.now() + 300);
+  } else await popup.click('#resume-button');
+  await waitState(s => s.job?.source === (scheduled ? 'scheduled' : 'resume') && s.status.running);
   assert.equal(state.job.tabId, tabId, 'Continue must reuse the existing task tab');
   await waitState(s => !s.status.running && s.status.state === 'claimed');
   assert.deepEqual(state.status.games.map(game => game.status), ['already_owned', 'claimed', 'claimed']);
   assert.equal(state.job, null);
-  assert.equal(state.settings.enabled, false);
+  assert.equal(state.settings.enabled, scheduled);
   assert.deepEqual(navigations, { [games[0].id]: 1, [games[1].id]: 2, [games[2].id]: 2 });
   for (const game of games) {
     const count = game.id === games[0].id ? 0 : 1;
@@ -189,10 +205,12 @@ async function check() {
   }
   await popup.waitForFunction(() => !document.getElementById('run-button').disabled && document.getElementById('resume-button').hidden);
   assert.equal(await worker.evaluate(() => chrome.action.getBadgeText({})), '✓');
-  assert.deepEqual(await worker.evaluate(() => chrome.alarms.getAll()), []);
+  const alarms = await worker.evaluate(() => chrome.alarms.getAll());
+  assert.deepEqual(alarms.map(alarm => alarm.name), scheduled ? ['epic-daily'] : []);
+  if (scheduled) assert.ok(alarms[0].scheduledTime > Date.now());
   assert.equal(context.pages().some(page => games.some(game => game.url === page.url())), false);
   assert.deepEqual(errors, []);
-  report = { passed: true, limits, state, navigations, events, clockAdvancedMs: 65000 };
+  report = { passed: true, scheduled, limits, state, navigations, events, clockAdvancedMs: 65000 };
 }
 try {
   await Promise.race([check(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Browser check deadline')), 60000); })]);
@@ -203,5 +221,5 @@ try {
 } finally {
   clearTimeout(timer);
   if (context) await context.close();
-  writeFileSync(path.join(directory, 'resume-browser-check.json'), `${JSON.stringify(report, null, 2)}\n`);
+  writeFileSync(path.join(directory, scheduled ? 'scheduled-resume-browser-check.json' : 'resume-browser-check.json'), `${JSON.stringify(report, null, 2)}\n`);
 }

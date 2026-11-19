@@ -32,9 +32,9 @@ async function make({data={},session='browser-a',sessionData,toolbarState,engine
 }
 let count=0;
 async function test(name,fn){await fn();console.log(`ok ${++count}: ${name}`);}
-await test('fresh install is idle with schedule off and cannot enable before success',async()=>{const m=await make();assert.equal(m.local.settings.enabled,false);assert.equal(m.toolbar.text,'');assert.equal(m.alarms.size,0);assert.equal((await m.message('setEnabled',{enabled:true})).ok,false);assert.equal(m.created.length,0);});
+await test('fresh install keeps schedule off until explicitly enabled without requiring a successful claim',async()=>{const m=await make();assert.equal(m.local.settings.enabled,false);assert.equal(m.toolbar.text,'');assert.equal(m.alarms.size,0);assert.equal((await m.message('setEnabled',{enabled:true})).ok,true);assert.equal(m.created.length,0);});
 await test('successful manual run opens and closes exactly its own one tab then enables Beijing schedule',async()=>{const m=await make();m.tabs.set(9,{id:9,url:'https://example.com'});await m.message('runNow');await m.settle();assert.equal(m.local.status.state,'claimed');assert.equal(m.toolbar.text,'✓');assert.equal(m.toolbar.color,'#15803d');assert.equal(m.created.length,1);assert.deepEqual(m.removed,[100]);assert.ok(m.tabs.has(9));assert.equal(m.local.job,null);assert.equal((await m.message('setEnabled',{enabled:true})).ok,true);const when=new Date(m.alarms.get('epic-daily').scheduledTime);assert.equal(when.getUTCHours(),15);assert.equal(when.getUTCMinutes(),35);});
-await test('verification keeps exactly one tracked tab, disables schedule and rejects another run',async()=>{const m=await make({engine:async()=>({status:'needs_attention',reason:'security_check'})});await m.message('runNow');await m.settle();assert.equal(m.local.job.phase,'manual');assert.equal(m.toolbar.text,'!');assert.equal(m.toolbar.color,'#dc2626');assert.equal(m.local.settings.enabled,false);assert.equal(m.created.length,1);assert.deepEqual(m.removed,[]);assert.equal((await m.message('runNow')).ok,false);await m.message('stop');assert.deepEqual(m.removed,[100]);assert.equal(m.local.job,null);});
+await test('verification keeps one tracked tab and does not enable a disabled schedule',async()=>{const m=await make({engine:async()=>({status:'needs_attention',reason:'security_check'})});await m.message('runNow');await m.settle();assert.equal(m.local.job.phase,'manual');assert.equal(m.toolbar.text,'!');assert.equal(m.toolbar.color,'#dc2626');assert.equal(m.local.settings.enabled,false);assert.equal(m.created.length,1);assert.deepEqual(m.removed,[]);assert.equal((await m.message('runNow')).ok,false);await m.message('stop');assert.deepEqual(m.removed,[100]);assert.equal(m.local.job,null);});
 await test('closing retained tab clears ownership and allows manual run',async()=>{const m=await make({engine:async()=>({status:'needs_login'})});await m.message('runNow');await m.settle();m.tabs.delete(100);m.callbacks.removed(100);await m.settle();assert.equal(m.local.job,null);assert.equal((await m.message('runNow')).ok,true);await m.settle();assert.equal(m.created.length,2);});
 await test('concurrent requests open only one tab; stop cancels in-flight engine results',async()=>{let finish;const m=await make({engine:()=>new Promise(resolve=>{finish=resolve;})});const outcomes=await Promise.all([m.message('runNow'),m.message('runNow')]);await m.settle();assert.equal(outcomes.filter(x=>x.ok).length,1);assert.equal(m.created.length,1);await m.message('stop');finish({status:'claimed'});await m.settle();assert.equal(m.local.status.state,'stopped');assert.equal(m.local.job,null);assert.deepEqual(m.removed,[100]);});
 for(const trigger of ['alarm','timer'])await test(`deadline ${trigger} preserves the checkout and ignores late completion`,async()=>{
@@ -51,13 +51,13 @@ for(const trigger of ['alarm','timer'])await test(`deadline ${trigger} preserves
  assert.equal(m.local.status.state,'needs_attention');assert.deepEqual(m.removed,[]);
  await m.message('stop');assert.deepEqual(m.removed,[100]);assert.equal(m.local.job,null);
 });
-await test('empty or oversized discovery never reports success or opens a tab',async()=>{for(const games of [[],Array.from({length:11},(_,i)=>({...game,id:String(i)}))]){const m=await make({games});await m.message('runNow');await m.settle();assert.ok(['no_free_games','failed'].includes(m.local.status.state));assert.equal(m.created.length,0);assert.equal(m.local.settings.enabled,false);assert.equal((await m.message('setEnabled',{enabled:true})).ok,false);}});
-await test('same-session service worker restart cleans interrupted job without resubmission',async()=>{const m=await make({data:{settings:{enabled:true},status:{state:'running',running:true,games:[{...game,status:'pending'}]},job:{runId:'old',sessionId:'browser-a',tabId:4,phase:'running'}}});assert.equal(m.local.status.state,'interrupted');assert.equal(m.toolbar.text,'!');assert.equal(m.local.settings.enabled,false);assert.equal(m.local.job,null);assert.deepEqual(m.removed,[4]);assert.equal(m.created.length,0);});
+await test('empty or oversized discovery never reports success or opens a tab',async()=>{for(const games of [[],Array.from({length:11},(_,i)=>({...game,id:String(i)}))]){const m=await make({games});await m.message('runNow');await m.settle();assert.ok(['no_free_games','failed'].includes(m.local.status.state));assert.equal(m.created.length,0);assert.equal(m.local.settings.enabled,false);assert.equal((await m.message('setEnabled',{enabled:true})).ok,true);}});
+await test('opt-out keeps the old interrupted-job cleanup behavior without resubmission',async()=>{const m=await make({data:{settings:{enabled:true,keepScheduleOnFailure:false},status:{state:'running',running:true,games:[{...game,status:'pending'}]},job:{runId:'old',sessionId:'browser-a',tabId:4,phase:'running'}}});assert.equal(m.local.status.state,'interrupted');assert.equal(m.toolbar.text,'!');assert.equal(m.local.settings.enabled,false);assert.equal(m.local.job,null);assert.deepEqual(m.removed,[4]);assert.equal(m.created.length,0);});
 await test('cross-session IDs are never closed; detached job blocks until explicit stop',async()=>{const m=await make({session:'browser-b',data:{settings:{enabled:true},status:{state:'running',running:true,games:[]},job:{runId:'old',sessionId:'browser-a',tabId:4,phase:'running'}}});assert.deepEqual(m.removed,[]);assert.equal(m.local.job.phase,'detached');assert.equal((await m.message('runNow')).ok,false);await m.message('stop');assert.equal(m.local.job,null);assert.deepEqual(m.removed,[]);});
 await test('scheduled run advances one fixed Beijing day without catch-up loops',async()=>{const m=await make({data:{settings:{enabled:true,hour:23,minute:35},status:{state:'already_owned',games:[{...game,status:'already_owned'}]}}});m.callbacks.alarm({name:'epic-daily',scheduledTime:1});await m.settle();assert.equal(m.created.length,1);assert.equal(m.local.status.state,'claimed');assert.equal(m.alarms.get('epic-daily').scheduledTime> Date.now(),true);});
 await test('content-script messages cannot start claims',async()=>{const m=await make();assert.equal(m.callbacks.message({type:'runNow'},{id:'extension',tab:{id:9}},()=>{}),false);assert.equal(m.created.length,0);});
 await test('stop during a late promotions response preserves stopped state and opens no tab',async()=>{let reply;const m=await make({fetcher:()=>new Promise(resolve=>{reply=resolve;})});await m.message('runNow');await m.settle();await m.message('stop');reply({ok:true,json:async()=>({})});await m.settle();assert.equal(m.local.status.state,'stopped');assert.equal(m.local.job,null);assert.equal(m.created.length,0);});
-await test('partial success followed by failure preserves all results and disables schedule',async()=>{let calls=0;const m=await make({games:[game,{...game,title:'Second game',url:'https://store.epicgames.com/p/second-game'}],engine:async()=>({status:++calls===1?'claimed':'failed',reason:'test_failure'})});await m.message('runNow');await m.settle();assert.equal(m.local.status.state,'failed');assert.deepEqual(m.local.status.games.map(x=>x.status),['claimed','failed']);assert.equal(m.local.settings.enabled,false);assert.equal(m.created.length,1);assert.deepEqual(m.removed,[100]);assert.equal((await m.message('setEnabled',{enabled:true})).ok,false);});
+await test('partial success followed by failure preserves results and permits schedule activation',async()=>{let calls=0;const m=await make({games:[game,{...game,title:'Second game',url:'https://store.epicgames.com/p/second-game'}],engine:async()=>({status:++calls===1?'claimed':'failed',reason:'test_failure'})});await m.message('runNow');await m.settle();assert.equal(m.local.status.state,'failed');assert.deepEqual(m.local.status.games.map(x=>x.status),['claimed','failed']);assert.equal(m.local.settings.enabled,false);assert.equal(m.created.length,1);assert.deepEqual(m.removed,[100]);assert.equal((await m.message('setEnabled',{enabled:true})).ok,true);});
 await test('already-owned is persisted as skipped while the next game is checked in the same tab',async()=>{
  let finishSecond;const seen=[];
  const m=await make({games:[game,{...game,title:'Second game',url:'https://store.epicgames.com/p/second-game'}],engine:async(tabId,current)=>{
@@ -261,6 +261,131 @@ await test('manual pause shows its actual cause instead of implying a security c
  await m.message('runNow');await m.settle();
  assert.ok(m.local.status.note.includes(reason));assert.doesNotMatch(m.local.status.note,/验证码|安全验证/);
  assert.equal(m.local.job.phase,'manual');assert.equal(m.toolbar.text,'!');
+});
+
+for (const keep of [true, false]) {
+ for (const outcome of ['needs_attention', 'needs_login', 'failed']) {
+  await test(`failure policy keep=${keep} handles ${outcome} without losing the red result`,async()=>{
+   const m=await make({data:{settings:{enabled:true,keepScheduleOnFailure:keep}},
+    engine:async()=>({status:outcome,reason:'Needs checking'})});
+   await m.message('runNow');await m.settle();
+   assert.equal(m.local.settings.enabled,keep);assert.equal(m.alarms.has('epic-daily'),keep);
+   assert.equal(m.local.status.nextRunAt!==null,keep);assert.equal(m.toolbar.text,'!');
+   assert.match(m.local.status.note,keep?/定时仍开启/:/定时已关闭/);
+   assert.equal(m.created.length,1);
+  });
+ }
+}
+await test('failure policy is migrated on, can be changed independently, and never silently enables daily checks',async()=>{
+ const m=await make({data:{settings:{enabled:false}}});
+ assert.equal(m.local.settings.keepScheduleOnFailure,true);
+ assert.equal((await m.message('setKeepScheduleOnFailure',{enabled:false})).ok,true);
+ assert.equal(m.local.settings.keepScheduleOnFailure,false);assert.equal(m.local.settings.enabled,false);
+ assert.equal((await m.message('setKeepScheduleOnFailure',{enabled:'true'})).ok,false);
+ await m.message('setKeepScheduleOnFailure',{enabled:true});
+ assert.equal(m.alarms.has('epic-daily'),false);assert.equal(m.created.length,0);
+});
+await test('network discovery failure keeps the next daily alarm, and an empty week does too',async()=>{
+ for(const keep of [true,false]){
+  const failed=await make({data:{settings:{enabled:true,keepScheduleOnFailure:keep}},fetcher:async()=>{throw Error('offline');}});
+  await failed.message('runNow');await failed.settle();
+  assert.equal(failed.local.settings.enabled,keep);assert.equal(failed.created.length,0);
+  const empty=await make({data:{settings:{enabled:true,keepScheduleOnFailure:keep}},games:[]});
+  await empty.message('runNow');await empty.settle();
+  assert.equal(empty.local.settings.enabled,true);assert.ok(empty.alarms.has('epic-daily'));
+ }
+});
+await test('daily alarm resumes the same submitted checkpoint and skips completed games',async()=>{
+ const current={...game,end:new Date(Date.now()+86400000).toISOString()};
+ const calls=[];
+ const m=await make({games:[current],data:{settings:{enabled:true}},engine:async(tab,g,cancel,progress,stage)=>{
+  calls.push({tab,stage});
+  if(stage===null){await progress('Submitted','submitted');return {status:'needs_attention'};}
+  return {status:'claimed'};
+ }});
+ await m.message('runNow');await m.settle();
+ assert.equal(m.local.settings.enabled,true);assert.equal(m.toolbar.text,'!');
+ m.callbacks.alarm({name:'epic-daily'});await m.settle();
+ assert.deepEqual(calls,[{tab:100,stage:null},{tab:100,stage:'submitted'}]);
+ assert.equal(m.created.length,1);assert.equal(m.local.status.state,'claimed');
+ assert.equal(m.local.settings.enabled,true);assert.ok(m.alarms.has('epic-daily'));
+});
+await test('worker wake preserves a paused or interrupted checkpoint and enabled schedule without launching a claim',async()=>{
+ for(const phase of ['manual','running']){
+  let calls=0;
+  const g={...game,status:'needs_attention',resumeStage:'submitted',end:new Date(Date.now()+86400000).toISOString()};
+  const m=await make({existingTabs:[{id:44,url:game.url}],data:{settings:{enabled:true},
+   status:{state:'needs_attention',running:phase==='running',games:[g]},
+   job:{runId:'paused',sessionId:'browser-a',phase,tabId:44,games:[g]}},engine:async()=>{calls++;return {status:'claimed'};}});
+  assert.equal(m.local.settings.enabled,true);assert.equal(m.local.job.phase,'manual');
+  assert.equal(m.local.job.games[0].resumeStage,'submitted');assert.equal(calls,0);
+  assert.deepEqual(m.removed,[]);assert.equal(m.toolbar.text,'!');
+ }
+});
+await test('expired old-session tasks do not block the next week or close any old tab IDs',async()=>{
+ const m=await make({session:'browser-b',data:{settings:{enabled:true},
+  status:{state:'needs_attention',games:[{...game,status:'needs_attention'}]},
+  job:{phase:'manual',sessionId:'browser-a',runId:'old',tabId:77,games:[{...game,end:'2000-01-01T00:00:00Z',status:'needs_attention',resumeStage:'submitted'}]}}});
+ m.tabs.set(77,{id:77,url:'https://example.com'});
+ m.callbacks.alarm({name:'epic-daily'});await m.settle();
+ assert.equal(m.created.length,1);assert.equal(m.local.status.state,'claimed');
+ assert.ok(m.tabs.has(77));assert.deepEqual(m.removed,[100]);assert.equal(m.local.settings.enabled,true);
+});
+await test('a current unresolved order without a usable tab gets a daily reminder and cannot be resubmitted',async()=>{
+ for(const end of [new Date(Date.now()+86400000).toISOString(),undefined]){
+  let calls=0;
+  const m=await make({session:'browser-b',data:{settings:{enabled:true},status:{state:'needs_attention',games:[]},
+   job:{phase:'manual',sessionId:'browser-a',runId:'old',tabId:77,games:[{...game,end,status:'needs_attention',resumeStage:'submitted'}]}},engine:async()=>{calls++;}});
+  m.callbacks.alarm({name:'epic-daily'});await m.settle();
+  assert.equal(calls,0);assert.equal(m.created.length,0);assert.deepEqual(m.removed,[]);
+  assert.equal(m.local.settings.enabled,true);assert.ok(m.alarms.has('epic-daily'));
+  assert.match(m.local.status.note,/无法安全继续/);assert.equal(m.toolbar.text,'!');
+ }
+});
+await test('closing a submitted checkout preserves its checkpoint for daily checks instead of creating a new order',async()=>{
+ const m=await make({games:[{...game,end:new Date(Date.now()+86400000).toISOString()}],
+  data:{settings:{enabled:true}},engine:async(tab,g,cancel,progress)=>{
+   await progress('Submitted','submitted');return {status:'needs_attention'};
+  }});
+ await m.message('runNow');await m.settle();m.tabs.delete(100);m.callbacks.removed(100);await m.settle();
+ assert.equal(m.local.job.phase,'detached');assert.equal(m.local.settings.enabled,true);
+ m.callbacks.alarm({name:'epic-daily'});await m.settle();
+ assert.equal(m.created.length,1);assert.equal(m.local.job.games[0].resumeStage,'submitted');
+});
+await test('an unexpected error after submission preserves the checkpoint for the next daily run',async()=>{
+ for(const fail of ['throw','failed']){
+  const stages=[];
+  const m=await make({games:[{...game,end:new Date(Date.now()+86400000).toISOString()}],data:{settings:{enabled:true}},
+   engine:async(tab,g,cancel,progress,stage)=>{
+    stages.push(stage);if(stage==='submitted')return {status:'claimed'};
+    await progress('Submitted','submitted');
+    if(fail==='throw')throw Error('Lost acknowledgement');
+    return {status:'failed',reason:'Read failed after submission'};
+   }});
+  await m.message('runNow');await m.settle();
+  assert.equal(m.local.job.phase,'manual');assert.equal(m.local.job.games[0].resumeStage,'submitted');
+  assert.deepEqual(m.removed,[]);assert.equal(m.toolbar.text,'!');
+  m.callbacks.alarm({name:'epic-daily'});await m.settle();
+  assert.deepEqual(stages,[null,'submitted']);assert.equal(m.created.length,1);assert.equal(m.local.status.state,'claimed');
+ }
+});
+await test('Stop only cancels this run; disabling daily checks is explicit and survives failure policy',async()=>{
+ let finish;
+ const m=await make({data:{settings:{enabled:true}},engine:()=>new Promise(resolve=>{finish=resolve;})});
+ await m.message('runNow');await m.settle();await m.message('stop');
+ assert.equal(m.local.settings.enabled,true);assert.ok(m.alarms.has('epic-daily'));
+ finish({status:'failed'});await m.settle();assert.equal(m.local.status.state,'stopped');
+ await m.message('setEnabled',{enabled:false});m.callbacks.alarm({name:'epic-daily'});await m.settle();
+ assert.equal(m.local.settings.enabled,false);assert.equal(m.alarms.has('epic-daily'),false);assert.equal(m.created.length,1);
+});
+await test('the five-minute bound still cancels work while retaining the daily alarm',async()=>{
+ let finish;
+ const m=await make({data:{settings:{enabled:true}},engine:()=>new Promise(resolve=>{finish=resolve;})});
+ await m.message('runNow');await m.settle();
+ m.callbacks.alarm([...m.alarms.values()].find(a=>a.name.startsWith('epic-deadline-')));await m.settle();
+ assert.equal(m.local.status.state,'needs_attention');assert.equal(m.local.settings.enabled,true);
+ assert.ok(m.alarms.has('epic-daily'));assert.equal(m.created.length,1);
+ finish({status:'claimed'});await m.settle();assert.equal(m.local.status.state,'needs_attention');
 });
 
 console.log(`Passed ${count} mocked lifecycle checks; no browser was launched.`);

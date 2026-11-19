@@ -99,6 +99,9 @@ async function check() {
   assert.ok(report.measurements.every(value => value.workerStatus === 'stopped'));
   assert.deepEqual(report.requests, []);
   assert.deepEqual(report.errors, []);
+  const preview = context.pages().at(-1);
+  await preview.setViewportSize({ width: 380, height: 800 });
+  await preview.locator('body').screenshot({ path: path.join(directory, 'popup-preview.png') });
   report.sourceVersion = JSON.parse(readFileSync(path.join(extension, 'manifest.json'), 'utf8')).version;
 }
 

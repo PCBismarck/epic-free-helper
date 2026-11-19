@@ -5,8 +5,8 @@ const DAILY_ALARM = 'epic-daily';
 const DEADLINE_PREFIX = 'epic-deadline-';
 const RUN_LIMIT_MS = 5 * 60 * 1000;
 const MAX_GAMES = 10;
-const DEFAULT_SETTINGS = { enabled: false, hour: 23, minute: 35 };
-const EMPTY_STATUS = { state: 'idle', note: '请先手动试领，确认正常后再开启定时。', games: [], running: false, updatedAt: null, nextRunAt: null, tabId: null };
+const DEFAULT_SETTINGS = { enabled: false, keepScheduleOnFailure: true, hour: 23, minute: 35 };
+const EMPTY_STATUS = { state: 'idle', note: '可手动领取，也可开启每日定时检查。', games: [], running: false, updatedAt: null, nextRunAt: null, tabId: null };
 let sessionId;
 let activeRun = null;
 let mutationTail = Promise.resolve();
@@ -24,9 +24,23 @@ function exclusive(action) {
 function normalizeSettings(settings = {}) {
   return {
     enabled: settings.enabled === true,
+    keepScheduleOnFailure: settings.keepScheduleOnFailure !== false,
     hour: Number.isInteger(settings.hour) && settings.hour >= 0 && settings.hour <= 23 ? settings.hour : DEFAULT_SETTINGS.hour,
     minute: Number.isInteger(settings.minute) && settings.minute >= 0 && settings.minute <= 59 ? settings.minute : DEFAULT_SETTINGS.minute,
   };
+}
+
+function applyFailurePolicy(settings) {
+  if (!settings.keepScheduleOnFailure) settings.enabled = false;
+}
+
+function scheduleNote(settings) {
+  return settings.enabled ? '每日定时仍开启，下次检查时间见下方。' : '每日定时已关闭。';
+}
+
+function hasUnconfirmedSubmission(games) {
+  return Array.isArray(games) && games.some(game => game?.resumeStage === 'submitted' &&
+    !['claimed', 'already_owned'].includes(game.status));
 }
 
 function normalizeState(data) {
@@ -138,24 +152,29 @@ async function initialize() {
   const stored = await chrome.storage.local.get(['settings', 'status', 'job']);
   let { settings, status, job } = normalizeState(stored);
   if (job) {
-    settings.enabled = false;
+    applyFailurePolicy(settings);
     await chrome.alarms.clear(`${DEADLINE_PREFIX}${job.runId}`);
     if (job.sessionId !== sessionId || job.phase === 'detached') {
       // Tab IDs must not be trusted across browser sessions. Keep an explicit
       // block until Stop instead of possibly closing somebody else's tab.
       job = { ...job, phase: 'detached', tabId: null };
       status = { ...status, state: 'interrupted', note: '浏览器或扩展已重启，本轮不会继续。请关闭之前的领取页，再点“停止”清除任务记录。', running: false, tabId: null };
-    } else if (job.phase === 'manual' && await recordedTabExists(job)) {
+    } else if ((job.phase === 'manual' || settings.keepScheduleOnFailure) && await recordedTabExists(job)) {
+      if (job.phase !== 'manual') status = { ...status, state: 'interrupted', note: '后台任务中断，已保留领取页和进度，可继续任务。' };
+      job = { ...job, phase: 'manual' };
       status = { ...status, running: false, tabId: job.tabId };
+    } else if (settings.keepScheduleOnFailure) {
+      job = { ...job, phase: 'detached', tabId: null };
+      status = { ...status, state: 'interrupted', note: '上次领取页已不可用，请检查上次结果后停止旧任务。', running: false, tabId: null };
     } else {
       await closeRecordedTab(job);
       job = null;
-      status = { ...status, state: 'interrupted', note: '后台任务中断，已停止并关闭本轮领取页。请先检查上次结果；定时已关闭。', running: false, tabId: null };
+      status = { ...status, state: 'interrupted', note: '后台任务中断，已停止并关闭本轮领取页。请先检查上次结果。', running: false, tabId: null };
     }
     status.updatedAt = new Date().toISOString();
   } else if (status.running) {
-    settings.enabled = false;
-    status = { ...status, state: 'interrupted', note: '上次任务状态不完整，已停止且关闭定时。', running: false, tabId: null, updatedAt: new Date().toISOString() };
+    applyFailurePolicy(settings);
+    status = { ...status, state: 'interrupted', note: '上次任务状态不完整，已停止本轮。', running: false, tabId: null, updatedAt: new Date().toISOString() };
   }
   status = await syncSchedule(settings, status);
   const changes = Object.fromEntries(Object.entries({ settings, status, job })
@@ -195,18 +214,20 @@ async function finishRun(run, state, note, keepTab = false) {
     const data = await readState();
     if (data.job?.runId !== run.runId) { activeRun = null; return; }
     await chrome.alarms.clear(`${DEADLINE_PREFIX}${run.runId}`);
-    const safeSuccess = ['claimed', 'already_owned'].includes(state);
-    if (!safeSuccess) data.settings.enabled = false;
-    const preserve = keepTab && await recordedTabExists(data.job);
+    const safeSuccess = ['claimed', 'already_owned', 'no_free_games'].includes(state);
+    if (!safeSuccess) applyFailurePolicy(data.settings);
+    const pendingSubmission = hasUnconfirmedSubmission(run.games);
+    const preserve = (keepTab || pendingSubmission) && await recordedTabExists(data.job);
     if (!preserve) await closeRecordedTab(data.job);
     const status = await syncSchedule(data.settings, {
-      ...data.status, state, note, games: run.games,
+      ...data.status, state, note: safeSuccess ? note : `${note} ${scheduleNote(data.settings)}`, games: run.games,
       running: false, updatedAt: new Date().toISOString(),
       tabId: preserve ? data.job.tabId : null,
     });
     await saveState({
       settings: data.settings, status,
-      job: preserve ? { ...data.job, phase: 'manual', games: run.games } : null,
+      job: preserve ? { ...data.job, phase: 'manual', games: run.games }
+        : pendingSubmission ? { ...data.job, phase: 'detached', tabId: null, games: run.games } : null,
     });
     activeRun = null;
   });
@@ -231,7 +252,7 @@ async function executeRun(run) {
       run.games = await fetchGames(run);
       if (cancelled(run)) return;
       if (!run.games.length) {
-        await finishRun(run, 'no_free_games', '没有找到符合规则的 PC 周免游戏；本次没有领取，定时已关闭。');
+        await finishRun(run, 'no_free_games', '没有找到符合规则的 PC 周免游戏，本次没有领取。');
         return;
       }
       if (!await saveProgress(run, `找到 ${run.games.length} 款 PC 周免，准备逐一检查。`)) return;
@@ -268,10 +289,10 @@ async function executeRun(run) {
       if (!['claimed', 'already_owned'].includes(game.status)) {
         const manual = ['needs_login', 'needs_attention'].includes(game.status);
         const note = game.status === 'needs_login'
-          ? '需要登录，已保留领取页并关闭定时。完成登录后点击“继续任务”。'
+          ? '需要登录，已保留领取页。完成登录后点击“继续任务”。'
           : manual
-            ? `${game.reason || '页面状态需要人工确认'}；已保留领取页并关闭定时。处理后点击“继续任务”。`
-            : '本轮领取失败，已关闭领取页和定时。请查看下方结果后再手动试领。';
+            ? `${game.reason || '页面状态需要人工确认'}；已保留领取页。处理后点击“继续任务”。`
+            : '本轮领取失败，请查看下方结果。';
         await finishRun(run, game.status, note, manual);
         return;
       }
@@ -284,8 +305,8 @@ async function executeRun(run) {
   } catch (error) {
     if (activeRun !== run || run.cancelled) return;
     const note = error?.message === 'too_many_games'
-      ? '周免列表超过本轮 10 款上限，已停止并关闭定时。请人工检查。'
-      : '网络、页面或任务执行出错，已停止并关闭定时。请查看结果后再手动试领。';
+      ? '周免列表超过本轮 10 款上限，已停止。请人工检查。'
+      : '网络、页面或任务执行出错，已停止本轮。请查看结果。';
     await finishRun(run, 'failed', note);
   }
 }
@@ -319,7 +340,7 @@ async function startRun(source, resuming = false) {
     });
     await chrome.alarms.create(`${DEADLINE_PREFIX}${run.runId}`, { when: run.deadline });
     run.timer = setTimeout(() => {
-      void finishRun(run, 'needs_attention', '本轮已达到 5 分钟上限，已停止并关闭定时；已保留领取页供检查。', true).catch(() => {});
+      void finishRun(run, 'needs_attention', '本轮已达到 5 分钟上限，已停止；已保留领取页供检查。', true).catch(() => {});
     }, RUN_LIMIT_MS);
     // The popup receives the start acknowledgement immediately. Progress and
     // results arrive through chrome.storage.onChanged, including after it closes.
@@ -329,14 +350,14 @@ async function startRun(source, resuming = false) {
     run.cancelled = true;
     clearTimeout(run.timer);
     await chrome.alarms.clear(`${DEADLINE_PREFIX}${run.runId}`);
-    data.settings.enabled = false;
+    applyFailurePolicy(data.settings);
     if (resuming) {
       const status = await syncSchedule(data.settings, { ...data.status, state: 'needs_attention', note: '任务未能继续，已保留领取页和进度，请再次点击“继续任务”。', running: false, updatedAt: new Date().toISOString() });
       await saveState({ settings: data.settings, status, job: { ...data.job, phase: 'manual' } });
       activeRun = null;
       throw error;
     }
-    const status = await syncSchedule(data.settings, { ...data.status, state: 'failed', note: '任务未能启动，已停止并关闭定时。', running: false, tabId: null, updatedAt: new Date().toISOString() });
+    const status = await syncSchedule(data.settings, { ...data.status, state: 'failed', note: `任务未能启动，已停止本轮。${scheduleNote(data.settings)}`, running: false, tabId: null, updatedAt: new Date().toISOString() });
     await saveState({ settings: data.settings, status, job: null });
     activeRun = null;
     throw error;
@@ -352,9 +373,8 @@ async function stopRun() {
   }
   if (data.job) await chrome.alarms.clear(`${DEADLINE_PREFIX}${data.job.runId}`);
   await closeRecordedTab(data.job);
-  data.settings.enabled = false;
   const status = await syncSchedule(data.settings, {
-    ...data.status, state: 'stopped', note: '已停止，定时已关闭。', running: false,
+    ...data.status, state: 'stopped', note: `已停止本次任务。${scheduleNote(data.settings)}`, running: false,
     tabId: null, updatedAt: new Date().toISOString(),
   });
   await saveState({ settings: data.settings, status, job: null });
@@ -366,7 +386,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Only our popup/extension pages can start orders, not injected page scripts.
   if (sender.id !== chrome.runtime.id ||
       (sender.tab && !sender.url?.startsWith(`chrome-extension://${chrome.runtime.id}/`))) return false;
-  if (!['getStatus', 'runNow', 'resume', 'setEnabled', 'stop'].includes(message?.type)) return false;
+  if (!['getStatus', 'runNow', 'resume', 'setEnabled', 'setKeepScheduleOnFailure', 'stop'].includes(message?.type)) return false;
   void ready.then(() => exclusive(async () => {
     if (message.type === 'getStatus') return response();
     if (message.type === 'runNow') return startRun('manual');
@@ -374,13 +394,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'stop') return stopRun();
     if (typeof message.enabled !== 'boolean') return response(false, '启用状态无效。');
     const data = await readState();
-    if (message.enabled && data.job) return response(false, '请先完成或停止当前任务，再开启定时。');
-    if (message.enabled && (!['claimed', 'already_owned'].includes(data.status.state)
-        || !data.status.games.length
-        || !data.status.games.every(game => ['claimed', 'already_owned'].includes(game.status)))) {
-      return response(false, '请先手动领取并确认本轮全部游戏成功或已在库中，再开启定时。');
-    }
-    data.settings.enabled = message.enabled;
+    if (message.type === 'setKeepScheduleOnFailure') data.settings.keepScheduleOnFailure = message.enabled;
+    else data.settings.enabled = message.enabled;
     const status = await syncSchedule(data.settings, data.status, true);
     await saveState({ settings: data.settings, status });
     return response();
@@ -397,12 +412,31 @@ chrome.alarms.onAlarm.addListener(alarm => {
         // Always schedule the next Beijing evening, never repeat missed days.
         const status = await syncSchedule(data.settings, data.status, true);
         await saveState({ status });
+        if (activeRun || data.status.running) return;
+        if (data.job) {
+          // Retain an unresolved checkout and its submission checkpoint. Only
+          // a wholly expired promotion may be retired for a new week's run.
+          // Never touch old-session tab IDs, even when retiring their record.
+          const games = data.job.games;
+          const expired = Array.isArray(games) && games.length > 0 && games.every(game =>
+            Number.isFinite(Date.parse(game?.end)) && Date.parse(game.end) <= Date.now());
+          if (expired) {
+            await chrome.alarms.clear(`${DEADLINE_PREFIX}${data.job.runId}`);
+            await saveState({ job: null, status: { ...status, tabId: null } });
+          } else {
+            const result = await startRun('scheduled', true);
+            if (!result.ok) await saveState({ status: { ...status, running: false,
+              note: '每日检查已触发，但旧任务无法安全继续。请检查保留页面后继续或停止旧任务；定时仍开启。',
+              updatedAt: new Date().toISOString() } });
+            return;
+          }
+        }
         await startRun('scheduled');
       });
     } else if (alarm.name.startsWith(DEADLINE_PREFIX)) {
       const run = activeRun;
       if (run && alarm.name === `${DEADLINE_PREFIX}${run.runId}`) {
-        await finishRun(run, 'needs_attention', '本轮已达到 5 分钟上限，已停止并关闭定时；已保留领取页供检查。', true);
+        await finishRun(run, 'needs_attention', '本轮已达到 5 分钟上限，已停止；已保留领取页供检查。', true);
       }
     }
   }).catch(() => {});
@@ -418,11 +452,15 @@ chrome.tabs.onRemoved.addListener(tabId => {
       activeRun.abort?.abort();
       activeRun = null;
       await chrome.alarms.clear(`${DEADLINE_PREFIX}${data.job.runId}`);
-      data.settings.enabled = false;
-      data.status = { ...data.status, state: 'stopped', note: '领取页已关闭，本轮停止且定时已关闭。', running: false };
+      applyFailurePolicy(data.settings);
+      data.status = { ...data.status, state: 'interrupted', note: `领取页已关闭，本轮停止。${scheduleNote(data.settings)}`, running: false };
     }
     const status = await syncSchedule(data.settings, { ...data.status, tabId: null, updatedAt: new Date().toISOString() });
-    await saveState({ settings: data.settings, status, job: null });
+    // Losing a submitted checkout must not silently turn tomorrow's check
+    // into a fresh order. Keep the checkpoint until resolved or expired.
+    const unresolvedSubmission = hasUnconfirmedSubmission(data.job.games);
+    await saveState({ settings: data.settings, status,
+      job: unresolvedSubmission ? { ...data.job, phase: 'detached', tabId: null } : null });
   })).catch(() => {});
 });
 

@@ -46,6 +46,8 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid 
 .notice { margin: 10px 0 0; color: #e4b572; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .schedule { margin-top: 20px; padding-bottom: 19px; border-bottom: 1px solid #273245; }
 .schedule-label { display: flex; align-items: center; justify-content: space-between; gap: 10px; line-height: 1.6; cursor: pointer; }
+.schedule-policy { margin-top: 14px; }
+#next-run { color: #b5c3d8; }
 .timezone { display: block; color: #8fa0b8; font-size: 11px; }
 .schedule p { margin: 9px 0 0; color: #8fa0b8; font-size: 11px; line-height: 1.6; }
 input[role="switch"] { appearance: none; flex: 0 0 34px; width: 34px; height: 20px; margin: 0; border: 1px solid #526178; border-radius: 20px; background: #354257; cursor: pointer; }

@@ -33,8 +33,8 @@ function mount({ data = saved, read, command } = {}) {
     el: id => document.getElementById(id),
     change(update, area = 'local') { changed(update, area); },
     click(id) { document.getElementById(id).dispatchEvent(new window.Event('click')); },
-    toggle(enabled) {
-      const el = document.getElementById('enabled-toggle');el.checked = enabled;
+    toggle(enabled, id = 'enabled-toggle') {
+      const el = document.getElementById(id);el.checked = enabled;
       el.dispatchEvent(new window.Event('change'));
     },
   };
@@ -157,4 +157,38 @@ test('an explicit command failure leaves saved results visible with an error mes
   assert.equal(m.el('game-list').children.length, 1);
   assert.match(m.el('notice').textContent, /暂时无法/);
   assert.equal(m.el('run-button').disabled, false);
+});
+
+test('failure policy defaults on while the daily master switch stays off', async () => {
+  const m=mount({data:{}});await flush();
+  assert.equal(m.el('keep-schedule-toggle').checked,true);
+  assert.equal(m.el('enabled-toggle').checked,false);
+  assert.match(m.el('next-run').textContent,/定时已关闭/);
+  assert.equal(m.messages.length,0);
+});
+
+test('a paused task displays its next Beijing check and still offers Continue',async()=>{
+  const m=mount({data:{settings:{enabled:true,keepScheduleOnFailure:true},
+    status:{state:'needs_attention',games:[game],nextRunAt:Date.parse('2026-11-20T15:35:00Z')},
+    job:{phase:'manual',games:[{...game,status:'needs_attention',resumeStage:'submitted'}]}}});await flush();
+  assert.match(m.el('next-run').textContent,/11.20.*23:35/);
+  assert.equal(m.el('resume-button').hidden,false);assert.equal(m.el('enabled-toggle').disabled,false);
+  assert.equal(m.messages.length,0);
+});
+
+test('the failure-policy switch sends its own command and reflects confirmed settings',async()=>{
+  const m=mount({command:async message=>({ok:true,...saved,settings:{enabled:false,keepScheduleOnFailure:message.enabled}})});
+  await flush();m.toggle(false,'keep-schedule-toggle');await flush();
+  assert.deepEqual(m.messages.map(m=>({...m})),[{type:'setKeepScheduleOnFailure',enabled:false}]);
+  assert.equal(m.el('keep-schedule-toggle').checked,false);
+  assert.equal(m.el('enabled-toggle').checked,false);
+  assert.match(m.el('schedule-help').textContent,/自动关闭每日定时/);
+});
+
+test('live schedule changes update the next check without dismissing a failed result',async()=>{
+  const m=mount({data:{...saved,status:{state:'failed',games:[{...game,status:'failed'}]}}});await flush();
+  m.change({settings:{newValue:{enabled:true,keepScheduleOnFailure:true}},status:{newValue:{state:'failed',nextRunAt:Date.parse('2026-11-21T15:35:00Z')}}});
+  assert.match(m.el('status-text').textContent,/未完成/);
+  assert.match(m.el('next-run').textContent,/11.21.*23:35/);
+  assert.equal(m.messages.length,0);
 });

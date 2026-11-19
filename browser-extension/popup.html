@@ -38,7 +38,13 @@
           <span>每天 23:35 自动检查<span class="timezone">（北京时间）</span></span>
           <input id="enabled-toggle" type="checkbox" role="switch" disabled>
         </label>
-        <p>浏览器开启时运行，遇到验证会暂停。</p>
+        <p id="next-run">每日定时已关闭</p>
+        <label class="schedule-label schedule-policy" for="keep-schedule-toggle">
+          <span>遇到问题后保留每日检查</span>
+          <input id="keep-schedule-toggle" type="checkbox" role="switch" aria-describedby="schedule-help" disabled>
+        </label>
+        <p id="schedule-help">本轮暂停后，次日按原进度检查。验证码仍需手动完成。</p>
+        <p>浏览器开启时运行。“停止本次任务”不关闭每日定时。</p>
       </section>
 
       <section class="games" aria-labelledby="games-heading">
